@@ -27,6 +27,8 @@ PhaseWeaver 选择另一个切口:**把 Agent 的执行生命周期本身作为�
 - G6 工具执行真做:Python 与 Shell 执行器具备超时、取消、进程树回收能力;Browser 只留接口。
 - G7 指标可从事件日志重放得到;能在无 GPU 的开发机上产出机制对比数据(标注可信度).
 - G8 为第二阶段(Durable Runtime)预留接缝,但不实现检查点与恢复。
+- G9 **性能稳定**:在过载与突发负载下,尾部延迟(p99)与抖动不劣化;显式抑制 park/restore 抖动风暴。
+- G10 **系统层面较优**:以全局 SLO 目标函数(而非逐单元局部规则)做资源决策,并用离线最优上界报告 optimality gap。
 
 ### 2.2 非目标(明确排除)
 
@@ -139,6 +141,7 @@ PhaseWeaver 选择另一个切口:**把 Agent 的执行生命周期本身作为�
 - **I5 树不孤立**:父单元处于终态 ⟹ 所有后代单元均处于终态
 - **I6 日志完备**:每次成功的阶段转移在 journal 中恰好出现一次,`seq` 严格单调递增
 - **I7 取消有界**:取消请求在 `grace_ms + 500 ms` 内使子树全部到达终态,且不遗留存活子进程
+- **I8 防饥饿**:容量可用时,已准入单元从进入 `QUEUED` 到获得 `REASONING` 的等待时间有上界(由 DRR 配额与 aging 保证);mock 中可断言 `max_queue_wait ≤ W_max`
 
 不变量在每次状态变更后由 `InvariantChecker` 校验(`strict` 模式抛错并 dump journal 尾部,`audit` 模式仅记录违规事件)。测试默认 `strict`。
 
@@ -173,6 +176,7 @@ class Lease:
 - 抢占动作由 `BackendAdapter.park()` 执行,broker 只做决策与记账,不触碰引擎。
 - 租约过期(若设置)由 `LeaseReaper` 定时扫描回收,回收事件落日志。
 - 所有租约在 `Runtime.shutdown()` 时强制释放,并在日志中标记 `forced_release`(用于检验 I4)。
+- **配额分配**:`KV_BYTES` 总量按 max-min fair 切给活跃 Agent,再加 deficit round robin 轮转(见 §8.3)。单个 Agent 不得占用超过 `ceil(fair_share × 1.5)`;超出部分必须让出,以保护其他 Agent 的 p99(I8 的实现基础)。
 
 ## 8. 处置策略(Disposition)
 
@@ -185,12 +189,62 @@ class Lease:
 
 `BackendCaps` 声明:`supports_drop`、`supports_offload`、`supports_retain`、`supports_engine_sleep`、`capacity_bytes`、`mem_bw_bps`、`block_tokens`、`bytes_per_token`。不支持的能力在决策时**静默降级**(`OFFLOAD→DROP`,`RETAIN→DROP`),降级原因落日志字段 `degraded_from`。
 
-默认策略 `YieldOnToolPolicy`:
-1. 进入 `ACTING` 前,用 `expected_tool_duration_s`(来自 `ToolSpec` 声明;未声明时取同类工具的历史 P50,再缺失则用 `default_expected_s = 5.0`)按 §8 表的三档分桶;
-2. 按分桶结果选择处置(预算紧张时整体下移一档:`RETAIN → OFFLOAD → DROP`);
-3. 离开 `ACTING` 时立即 `restore`,并记录 `restore_latency_ms` 与 `recompute_tokens`。
+### 8.1 决策器分两阶段
 
-对照组策略:`PinAlwaysPolicy`(B0)、`TtlEvictPolicy`(B1)、`OraclePolicy`(B3,零成本立即恢复)。
+- **Phase A(M2)**:`YieldOnToolPolicy` —— 逐单元、按工具时长分桶的局部规则。目的是打通机制,不作为最终方案。
+- **Phase B(M3)**:`SystemScheduler` —— 全局决策,消费只读快照 `ClusterSnapshot`。
+
+两者实现同一 `Scheduler` 协议(`admit()` / `disposition_for()` / `on_capacity_change()`),因此可以作为消融项直接对比(局部 vs 全局)。
+
+Phase A 规则:
+1. 进入 `ACTING` 前,用 `expected_tool_duration_s`(`ToolSpec` 声明 → 同类工具历史 P50 → `default_expected_s = 5.0`)按上表三档分桶;
+2. 预算紧张时整体下移一档:`RETAIN → OFFLOAD → DROP`;
+3. 离开 `ACTING` 时 `restore`,记录 `restore_latency_ms` 与 `recompute_tokens`。
+
+### 8.2 Phase B:全局 SLO 调度器
+
+目标函数(SLO 优先,不是纯吞吐):
+
+```
+maximize   Σ_i w_i · 1[task_i 在 SLO_i 内完成]        # SLO-aware goodput
+subject to Σ resident_kv ≤ C - headroom
+           0 ≤ concurrent_reasoning ≤ R_max
+决策变量    每个上下文: RETAIN | OFFLOAD | DROP | RELEASE
+```
+
+快照字段:`resident_bytes`、`queued_units`、`running_reasoning`、`per_unit_slack`、`park_events(window_s=60)`。
+
+决策规则(可解释、无学习、无随机):
+
+1. `slack_i = deadline_i - now - est_remaining_work_i`;`slack` 越小,越优先保住其上下文。
+2. 若 `slack_i > 2 × est_tool_duration_i`(它不着急),即使工具很短也让出。
+3. 若 `slack_i < 0`(已无法满足 SLO),不为它抢占他人——避免"沉没成本拖垮全局"。
+4. 处置分档仍按上表,但由快照调整:`resident_bytes > 0.8 × C` 时整体下移一档。
+5. `est_remaining_work_i` 用同类工具历史 P50 × 剩余轮数估算;数据不足时退化为轮数 × 默认值。估计器必须可替换、可消融(见 §12.5)。
+
+### 8.3 稳定性:防抖与公平
+
+| 旋钮 | 作用 | 默认 |
+|---|---|---|
+| `min_residency_s` | 上下文至少驻留这么久才可被抢占(冷却) | 5 s |
+| `park_cooldown_s` | 同一上下文两次 park 的最小间隔 | 10 s |
+| `hysteresis_band` | 抢占阈值与恢复阈值之间的滞回带,避免临界点振荡 | 15% × C |
+| `restore_backpressure` | 恢复时容量不足 → 进 restore 队列按 slack 排序排队;**绝不打断正在执行的推理** | 开 |
+
+- **公平份额**:`C` 按 max-min fair 切给活跃 Agent,叠加 DRR(`deficit += quantum` 每轮,耗尽则让位)。上限 `ceil(fair_share × 1.5)`。
+- **抖动检测**:若同一上下文在 `thrash_window_s`(60 s)内发生 ≥ 2 次 park→restore,记 `thrash` 事件,并对该上下文强制提升一档保留(`RETAIN`),直到窗口滑出。这是把"性能稳定"变成可执行规则的地方。
+- **背压优先于抢占**:只有在 `RETAINED` 候选全部降级后仍不足,才拒绝入队;不允许为了让某个单元恢复而打断正在推理的单元。
+
+### 8.4 对照策略
+
+| 代号 | 策略 |
+|---|---|
+| B0 | `PinAlwaysPolicy`:一律保留到结束,无让出、无抢占,按容量 FIFO |
+| B1 | `TtlEvictPolicy`:固定 TTL 后释放(Continuum 式) |
+| B2a | `YieldOnToolPolicy`:Phase A 局部规则 |
+| B2 | `SystemScheduler`:Phase B 全局 SLO 调度(本项目主方案) |
+| B3 | `OraclePolicy`:进入 `ACTING` 即零成本 DROP、返回瞬时恢复(不可实现的上界) |
+| B4 | `OfflineOptimalPolicy`:已知全部工具时长,对小规模实例搜索最优处置序列(离线上界,见 §12.3) |
 
 ## 9. 工具执行
 
@@ -221,9 +275,16 @@ class ToolSpec:
   `lease_requested`、`lease_granted`、`lease_released`、`lease_preempted`、`admission_rejected`、
   `park_started`、`park_completed`、`restore_started`、`restore_completed`、
   `tool_started`、`tool_finished`、`tool_killed`、`reap_incomplete`、
+  `scheduler_decision`、`park_suppressed`、`restore_deferred`、`quota_updated`、`thrash`、
   `invariant_violated`、`run_started`、`run_finished`、`forced_release`。
 - 所有指标由 `MetricsReducer.replay(journal) -> RunReport`,**不维护独立的可变计数器**。
-- `RunReport`:per-task 延迟数组、`p50/p95`、`goodput`、`peak_resident_bytes`、`gpu_idle_wasted_bytes_s`、`recompute_tokens_wasted`、`park_counts`、`restore_latency_p95_ms`、`admission_rejects`、`jain_fairness`。
+- `RunReport` 字段(按组):
+  - 延迟:`latency_p50/p95/p99_ms`、`latency_cv`、per-agent 延迟数组
+  - 吞吐:`goodput`(SLO 达成量/墙钟秒)、`throughput_cv`(10 s 滑动窗口的变异系数)
+  - 资源:`peak_resident_bytes`、`gpu_idle_wasted_bytes_s`、`recompute_tokens_wasted`
+  - 行为:`park_counts`、`restore_latency_p95_ms`、`thrash_rate`(次/Agent·分钟)、`park_suppressed_count`、`restore_deferred_p95_ms`
+  - 公平/准入:`jain_fairness`、`admission_rejects`、`max_queue_wait_ms`(I8)、`slo_attainment_rate`
+  - 对照:`optimality_gap_pct`(仅当同时跑了 B4)
 - 第二阶段接缝:journal 已带 `seq` 与因果链,检查点只需 `(last_seq, snapshot)`;工具幂等回执只需在 `tool_started/finished` 上挂 `idempotency_key` 与 `result_hash`。第一阶段不实现。
 
 ## 11. Mock 后端契约
@@ -235,40 +296,65 @@ class ToolSpec:
 - **资源模型**:KV 以 block 为粒度分配;分配失败触发仿真内抢占(与 vLLM 的 preemption 语义一致),抢占产生 `preempted` 引擎事件。
 - **引擎事件**:`BlockStored`、`BlockRemoved`、`RequestPreempted`、`QueueDepthChanged`,与 vLLM `kv_events` 使用同一套词汇,runtime 走完全相同的感知路径(禁止任何"仅 mock 可用"的旁路)。
 - **确定性**:相同 `seed` 与相同工作负载 ⇒ 逐事件一致的 journal(测试用 `journal_digest` 断言)。
+- **到达与突发**:`arrival` 支持 `poisson(λ)` 与 `burst(multiplier, start_s, duration_s)`;过载由 `λ` 与 `queue_limit` 共同决定。
+- **SLO**:每个任务在 `run_started` 时绑定 `deadline = arrival + slo_s`,`slo_attainment_rate` 由此计算,不由调度器自行声明。
 - **`gpu_idle_wasted_bytes_s` 定义**:对所有 `t`,若 `active_inference_count(t) == 0`,则该时段内驻留的 KV 字节数 × 时长累加。这是"让出 GPU"收益的量化单位。
 
 ## 12. 指标与实验设计
 
 ### 12.1 对照与消融
 
-| 代号 | 配置 |
-|---|---|
-| B0 | `PinAlwaysPolicy`:KV 一律保留到单元结束,无让出、无抢占(按容量 FIFO 排队)—— 主流 Agent 框架 + 引擎默认行为的近似 |
-| B1 | `TtlEvictPolicy`(固定 TTL 释放,Continuum 式思路) |
-| B2 | `YieldOnToolPolicy`(PhaseWeaver) |
-| B3 | `OraclePolicy`(进入 ACTING 即零成本 DROP、返回瞬时恢复)——理论上界 |
+对照策略见表 §8.4(B0 / B1 / B2a / B2 / B3 / B4)。B2 为主方案,B2a 用于证明"全局调度 > 局部规则"。
 
-消融维度:预算(`2/4/8/16 GiB`)、`retain_max_s`、工具时长分布(全短 / 全慢 / 混合)、能力降级(禁用 `OFFLOAD`)、子 Agent 模式(`SHARE` vs `ISOLATE`)。
+消融维度:
+- 容量 `C ∈ {2, 4, 8, 16} GiB`
+- 局部规则的分桶阈值(`retain_max_s`、`offload_max_s`)
+- 稳定性旋钮:关掉 `min_residency_s` / `hysteresis_band` / `restore_backpressure` 各一组(证明它们不是装饰)
+- 能力降级:禁用 `OFFLOAD`(只剩 RETAIN/DROP)
+- 子 Agent 模式:`SHARE` vs `ISOLATE`
+- 工作量估计器:`perfect`(上帝视角)/ `historical_p50` / `rounds_default`
 
-### 12.2 工作负载
+### 12.2 工作负载(默认过载)
 
-- W1 同质:8 个 Agent,各 3 轮,工具时长 lognormal(P50=2s)。
-- W2 混合长短:4 个"浏览器型"长工具(30–60s)+ 6 个短工具,压测容量争抢。
-- W3 扇出:1 个父 Agent fork 4 个子 Agent 各 2 轮后 join,验证租约继承与汇合记账。
+工作负载描述为声明式 YAML(`examples/workloads/*.yaml`),字段:`agents`、`rounds`、`tool_dist`、`arrival`、`burst`、`slo_s`、`context_tokens`、`seed`。
 
-### 12.3 核心主张与判据
+- **W1 同质稳态**:12 Agent、各 4 轮、工具 lognormal(P50=2 s);到达率 λ 调到**队列恒非空**(过载),否则 goodput 无意义。
+- **W2 长短混合**:4 个长工具(30–60 s)+ 8 个短工具。
+- **W3 扇出**:1 父 fork 4 子 × 2 轮后 join;验证租约继承、汇合记账、树形取消。
+- **W4 突发**:稳态 λ 上叠 3× 突发持续 20 s,观察峰值违约率与恢复时间(稳定性主实验)。
+- **W5 子 Agent 竞争**:两组父子树并发,验证 `ISOLATE` 对 p99 的保护作用。
 
-主张:**工具执行期间让出推理资源,能提升同墙钟时间内的完成量并降低排队延迟;代价是可控的重算。**
+### 12.3 实验列表
 
-判据(B2 vs B0,在 8 GiB 预算、W2 下的期望方向):
-`goodput` 上升、`p95 端到端延迟` 下降、`gpu_idle_wasted_bytes_s` 显著下降;
-并且 `recompute_tokens_wasted` 的增长必须被 goodput 收益覆盖(报告里同时给出两者,不做选择性呈现)。
+| 编号 | 目的 | 产出 |
+|---|---|---|
+| E1 过载稳态 | 主对比 | goodput、p50/p95/p99、`gpu_idle_wasted_bytes_s` |
+| E2 突发 | 稳定性 | 峰值违约率、恢复时间、p99 时间序列 |
+| E3 容量扫描 | 系统层面较优 | **throughput vs p99 的 Pareto 前沿**(B0/B1/B2 三条曲线) |
+| E4 多 seed | 可复现 | 20 seed 的 mean ± std、组内 CV |
+| E5 最优性间隙 | 全局质量 | B4 上界 vs B2 的 `optimality_gap_pct` |
 
-### 12.4 数字可信度分级(强制标注在每张表上)
+**B4 实现约束**:只在小规模实例(≤ 6 Agent × ≤ 3 轮)上做,手段为"已知全部工具时长 + 离散时间步 DP/分支定界",搜索预算 `max_nodes=200k`;超预算即以当前最优解作为上界并在报告中标注 `bound_not_proven`。B4 只跑离线,不出现在运行时路径上。
+
+### 12.4 核心主张与判据
+
+主张:**在过载负载下,以 Agent 执行阶段为信号的全局资源协同,能在不牺牲尾部延迟稳定性的前提下提升 SLO 达成率;代价是可控的重算。**
+
+判据(B2 vs B0,8 GiB、W2 + W4):
+1. `slo_attainment_rate` 与 `goodput` 上升;
+2. `p99` **不劣化**(优于 B0 的 `min(p99)` 至少 5%),`latency_cv` 与 `throughput_cv` 下降;
+3. `thrash_rate` 低于 B1(TTL 驱逐)的一半——证明防抖生效;
+4. `gpu_idle_wasted_bytes_s` 显著下降;
+5. `recompute_tokens_wasted` 的增长被 goodput 收益覆盖,且两项同时呈现,不做选择性呈现。
+
+若第 2 条不成立(过载下 park/restore 反而抬高尾部),必须在报告中如实给出,并按 §8.3 调参后重跑——允许结论是"N 条不成立",不允许隐藏。
+
+### 12.5 数字可信度分级(强制标注在每张表上)
 
 - **L1 机制证明**:mock 仿真的对比结果。证明"机制按设计工作",不作为性能结论。
 - **L2 参数敏感性**:同一仿真下的消融与扫描。
-- **L3 真实测量**:`VLLMBackend` + 真实 GPU。**第一阶段不产出 L3**;规格要求所有文档不得把 L1/L2 表述为 L3。
+- **L3 真实测量**:`VLLMBackend` + 真实 GPU。**第一阶段不产出 L3**;任何文档不得把 L1/L2 表述为 L3。
+- 每张表/图必须带 `[L1]`/`[L2]` 标头与 `seed 数、C、负载参数` 三项脚注。
 
 ## 13. 仓库结构
 
@@ -279,7 +365,7 @@ PhaseWeaver/
 ├─ docs/
 │  ├─ specs/2026-11-07-phaseweaver-design.md
 │  ├─ plans/                   # 实施计划(writing-plans 产出)
-│  ├─ adr/0001..0004           # 关键取舍
+│  ├─ adr/0001..0005           # 关键取舍
 │  └─ notes/related-work.md
 ├─ src/phaseweaver/
 │  ├─ __init__.py  types.py  errors.py  protocols.py
@@ -288,9 +374,11 @@ PhaseWeaver/
 │  ├─ runtime.py
 │  ├─ tools/{__init__,base,python_exec,shell_exec,browser_exec,reaper}.py
 │  └─ backends/{__init__,base,mock,vllm,openai_compat}.py
-├─ tests/{unit,property,chaos,integration}/
+├─ tests/{unit,property,chaos,integration,perf}/
 └─ examples/{demo_compare.py,workloads/*.yaml}
 ```
+
+`src/phaseweaver/` 内另有两个后加模块:`scheduler.py`(§8.2 全局调度器 + 防抖旋钮 + DRR)与 `oracle.py`(§12.3 的 B4 离线最优上界,只在实验路径使用,不得被 `runtime.py` import)。
 
 模块纪律:单文件目标 ≤ 400 行;超过即拆分。`phases.py` / `leases.py` / `invariant.py` 不允许 import `runtime.py`(依赖环由 ruff 的 `TID`/自定义规则或纯人工评审保证,以 import 图测试固化)。
 
@@ -300,10 +388,11 @@ PhaseWeaver/
 |---|---|---|
 | M0 | 骨架、`types`、`phases`、FSM、journal、pytest 环境 | 非法转移被拒的测试全绿;`journal` 追加与读取测试通过 |
 | M1 | 单元树、fork/join、树形取消、Python+Shell 执行器、`ProcessReaper` | Windows 上取消长任务后无存活子进程(以进程树检查断言) |
-| M2 | `LeaseBroker`、预算准入、四种处置、`YieldOnToolPolicy`、不变量 | hypothesis property test 不变量零违反;预算不超发 |
-| M3 | `MockBackend` 全量仿真、`MetricsReducer`、`demo compare` | 本机 3 分钟内跑完 W1–W3 并输出 B0/B2/B3 对比表;`pytest` 全绿 |
-| M4 | `VLLMBackend`、`OpenAICompatBackend`、README、ADR、related-work | 对 OpenAI 兼容端点可跑通一次真实调用(或明确记录未验证) |
-| M5(独立 spec) | 检查点、事件重放恢复、工具幂等回执 | 不在本规格范围内 |
+| M2 | `LeaseBroker`、预算准入、四种处置、`YieldOnToolPolicy`(局部)、不变量 | hypothesis property test 不变量零违反;预算不超发 |
+| M3 | `SystemScheduler`(全局 + 防抖 + DRR)、`MockBackend` 全量仿真、`MetricsReducer`、`demo compare` | 不变量含 I8 全绿;W1/W2 下 B2 的 `thrash_rate` < B1/2,`p99` 不劣于 B0 |
+| M4 | 实验矩阵 E1–E5(含 `oracle.py` 的 B4)、Pareto 前沿图、20 seed 稳定性报告 | 产出带 `[L1]/[L2]` 标注的报告与图;E5 的 gap 数值落盘 |
+| M5 | `VLLMBackend`、`OpenAICompatBackend`、README 更新 | 对 OpenAI 兼容端点跑通一次真实调用(或明确记录未验证) |
+| M6(独立 spec) | 检查点、事件重放恢复、工具幂等回执 | 不在本规格范围内 |
 
 ## 15. 技术选型
 
@@ -323,6 +412,9 @@ PhaseWeaver/
 | 范围膨胀(调度算法、分布式、UI) | 第一阶段做不完 | §2.2 非目标 + 里程碑判据卡口 |
 | 数字被误读为性能结论 | 作品可信度受损 | §12.4 强制分级标注,表头必须出现 L1/L2 |
 | 引擎级 sleep/wake 影响同租户 | 真实环境副作用 | 默认关闭,需显式 `--allow-engine-sleep`,并在报告中单列 |
+| **park/restore 抖动风暴** | 过载下 p99 反而变差,主结论不成立 | §8.3 四旋钮 + `thrash` 事件 + 强制提档;E2/E4 专门验证;若仍不成立如实报告 |
+| 全局调度器过度拟合 mock | 迁移到真实引擎失效 | 调度器只消费 `ClusterSnapshot` 抽象字段;E5 报告 gap;真实引擎上线前不做参数精调 |
+| B4 搜索爆炸 | E5 跑不完 | 限制 ≤6 Agent × 3 轮、`max_nodes=200k`、超预算标 `bound_not_proven` |
 
 ## 17. 已解决的设计问题(记录取舍,避免反复)
 
@@ -331,3 +423,5 @@ PhaseWeaver/
 3. 第一阶段即引入事件日志——指标可重放,第二阶段的持久化直接复用。见 ADR-0003。
 4. 进程内 asyncio 运行时而非 sidecar——先验证机制,留 transport 缝。见 ADR-0004。
 5. Browser 只做接口——价值集中在生命周期与资源协同,不在浏览器自动化。
+6. 优化目标定为"SLO 达成率 + p99 不劣化",而非纯吞吐——纯吞吐可以靠牺牲长尾换数字,与"性能稳定"直接冲突。见 ADR-0005。
+7. 调度器分两阶段实现(局部规则 → 全局 SLO),并把两者作为消融项——既要"系统层面较优",也要能证明全局确实优于局部。
