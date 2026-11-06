@@ -36,6 +36,17 @@ Windows 本机有 5 条 sandbox 约束(管道/`taskkill`/`mkdtemp` 等),先读 [
 - `tests/integration/`:真实子进程、Runtime 端到端。
 - 不依赖 pytest 的 `tmp_path`(本机 sandbox 下不可用),临时文件放 `runs/`。
 
+### 跨平台类型检查
+
+CI 会在 ubuntu 与 windows 上分别跑 mypy,因此平台专属符号(`ctypes.WinDLL`、
+`subprocess.CREATE_NEW_PROCESS_GROUP`、`os.killpg` 等)必须用 `getattr` 取。
+提交前本地预演两个平台:
+
+```bash
+uv run mypy --platform linux src/phaseweaver
+uv run mypy --platform win32 src/phaseweaver
+```
+
 ## 评审清单
 
 - [ ] 是否引入新的不变量违反路径?是否补了 property test?

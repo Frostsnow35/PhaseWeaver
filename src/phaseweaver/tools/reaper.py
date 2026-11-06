@@ -27,8 +27,13 @@ JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
 def popen_kwargs() -> dict[str, object]:
     """Kept for callers that build their own Popen; see spawn_flags for mypy-safe use."""
     if os.name == "nt":
-        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+        return {"creationflags": int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))}
     return {"start_new_session": True}
+
+
+def _kernel32() -> Any:
+    windll = getattr(ctypes, "WinDLL")
+    return windll("kernel32", use_last_error=True)
 
 
 def spawn_flags() -> tuple[int, bool]:
@@ -101,7 +106,7 @@ class Job:
     def attach(cls, proc: subprocess.Popen[bytes]) -> Job | None:
         if os.name != "nt":
             return None
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32 = _kernel32()
         handle = kernel32.CreateJobObjectW(None, None)
         if not handle:
             return None
@@ -125,13 +130,13 @@ class Job:
     def terminate(self) -> None:
         if os.name != "nt" or not self._handle:
             return
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32 = _kernel32()
         kernel32.TerminateJobObject(self._handle, 1)
 
     def close(self) -> None:
         if os.name != "nt" or not self._handle:
             return
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32 = _kernel32()
         kernel32.CloseHandle(self._handle)
         self._handle = 0
 
