@@ -23,3 +23,8 @@ runs/
 .DS_Store
 .ruff-cache/
 
+.phaseweaver-tmp/
+
+probe*/
+pytest-cache-files-*/
+
