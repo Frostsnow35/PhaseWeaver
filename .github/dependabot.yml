@@ -18,3 +18,7 @@ updates:
     directory: "/"
     schedule:
       interval: "monthly"
+    # 大版本升级由人评估:它们常常改变 runner 要求或输入语义,不适合自动合并。
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
