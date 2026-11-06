@@ -316,7 +316,7 @@ class ToolSpec:
 
 ### 12.2 工作负载(默认过载)
 
-工作负载描述为声明式 YAML(`examples/workloads/*.yaml`),字段:`agents`、`rounds`、`tool_dist`、`arrival`、`burst`、`slo_s`、`context_tokens`、`seed`。
+工作负载描述为声明式 TOML(`examples/workloads/*.toml`,用标准库 `tomllib` 读取,保持核心零依赖),字段:`agents`、`rounds`、`tool_dist`、`arrival`、`burst`、`slo_s`、`context_tokens`、`seed`。
 
 - **W1 同质稳态**:12 Agent、各 4 轮、工具 lognormal(P50=2 s);到达率 λ 调到**队列恒非空**(过载),否则 goodput 无意义。
 - **W2 长短混合**:4 个长工具(30–60 s)+ 8 个短工具。
@@ -375,7 +375,7 @@ PhaseWeaver/
 │  ├─ tools/{__init__,base,python_exec,shell_exec,browser_exec,reaper}.py
 │  └─ backends/{__init__,base,mock,vllm,openai_compat}.py
 ├─ tests/{unit,property,chaos,integration,perf}/
-└─ examples/{demo_compare.py,workloads/*.yaml}
+└─ examples/{demo_compare.py,workloads/*.toml}
 ```
 
 `src/phaseweaver/` 内另有两个后加模块:`scheduler.py`(§8.2 全局调度器 + 防抖旋钮 + DRR)与 `oracle.py`(§12.3 的 B4 离线最优上界,只在实验路径使用,不得被 `runtime.py` import)。
