@@ -5,6 +5,8 @@ __pycache__/
 .venv/
 venv/
 .pytest_cache/
+.pytest-tmp/
+.uv-cache/
 .mypy_cache/
 .ruff_cache/
 .hypothesis/
@@ -19,3 +21,5 @@ runs/
 .vscode/
 .idea/
 .DS_Store
+.ruff-cache/
+
