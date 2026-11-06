@@ -59,7 +59,10 @@ def row(label: str, m: dict[str, float]) -> str:
     )
 
 
-HEADER = "| 策略 | goodput | p99 (s) | SLO | Jain | kv_waste | failed |\n|---|---|---|---|---|---|---|"
+HEADER = (
+    "| 策略 | goodput | p99 (s) | SLO | Jain | kv_waste | failed |\n"
+    "|---|---|---|---|---|---|---|"
+)
 
 
 def main() -> int:
