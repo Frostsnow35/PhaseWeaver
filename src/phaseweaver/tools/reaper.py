@@ -34,8 +34,25 @@ def popen_kwargs() -> dict[str, object]:
 def spawn_flags() -> tuple[int, bool]:
     """(creationflags, start_new_session) for subprocess.Popen."""
     if os.name == "nt":
-        return (subprocess.CREATE_NEW_PROCESS_GROUP, False)
+        # Windows-only attribute; mypy runs on either platform in CI.
+        return (int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)), False)
     return (0, True)
+
+
+_SIGTERM = int(getattr(signal, "SIGTERM", 15))
+_SIGKILL = int(getattr(signal, "SIGKILL", 9))
+
+
+def _signal_group(pid: int, sig: int) -> bool:
+    killpg = getattr(os, "killpg", None)
+    getpgid = getattr(os, "getpgid", None)
+    if killpg is None or getpgid is None:  # pragma: no cover - POSIX only
+        return False
+    try:
+        killpg(getpgid(pid), sig)
+        return True
+    except ProcessLookupError:
+        return False
 
 
 if os.name == "nt":
@@ -140,7 +157,8 @@ def kill_tree_sync(
             proc.kill()
         return
     try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)  # type: ignore[attr-defined]
+        if not _signal_group(proc.pid, _SIGTERM):
+            return
     except ProcessLookupError:
         return
     try:
@@ -148,9 +166,7 @@ def kill_tree_sync(
         return
     except subprocess.TimeoutExpired:
         pass
-    try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)  # type: ignore[attr-defined]
-    except ProcessLookupError:
+    if not _signal_group(proc.pid, _SIGKILL):
         return
     try:
         proc.wait(timeout=max(_GRACE_FLOOR_S, grace_ms / 1000))
