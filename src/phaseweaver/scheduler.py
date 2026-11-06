@@ -26,6 +26,9 @@ class SchedulerConfig:
     thrash_threshold: int = 2
     quantum_slots: int = 1
     allow_offload: bool = True
+    #: K3: choose disposition by comparing the cost of holding capacity against
+    #: the cost of recomputing, instead of duration buckets.
+    use_cost_model: bool = False
 
 
 @dataclass
@@ -84,7 +87,15 @@ class SystemScheduler:
         # 5) very urgent: keep
         if slack < expected_tool_s:
             return Disposition.RETAIN
-        # 6) relaxed: shift one level down
+
+        # 6) K3: explicit cost comparison (capacity-seconds vs GPU-seconds).
+        # Only meaningful when someone is actually waiting; otherwise holding is free.
+        if cfg.use_cost_model and (snap.queued > 0 or snap.pressure > cfg.pressure_threshold):
+            choice = self._cost_choice(unit_id, snap, expected_tool_s)
+            if choice is not None:
+                return self._degrade_if_needed(choice)
+
+        # 7) relaxed: shift one level down
         base = self._base(expected_tool_s)
         if slack > 2.0 * max(expected_tool_s, 1e-6):
             base = self._shift(base, 1)
@@ -115,6 +126,30 @@ class SystemScheduler:
             st.deficit += self.config.quantum_slots
 
     # --- internals --------------------------------------------------------
+    def _cost_choice(
+        self, unit_id: str, snap: ClusterSnapshot, expected_tool_s: float
+    ) -> Disposition | None:
+        """Compare costs in a common unit.
+
+        Holding: `(bytes / capacity) x expected_tool_s` — the share of the device
+        denied to everyone else for the tool's duration.
+        Dropping: `tokens / prefill_rate` — the GPU-seconds needed to recompute.
+        Offloading: `bytes / mem_bw` — the copy cost, far cheaper than recompute
+        but it does not free the device as decisively as dropping.
+        """
+        ctx_bytes = snap.resident_bytes_by_unit.get(unit_id, 0)
+        tokens = snap.tokens_by_unit.get(unit_id, 0)
+        if ctx_bytes <= 0 or tokens <= 0 or snap.capacity_bytes <= 0:
+            return None
+        hold = (ctx_bytes / snap.capacity_bytes) * expected_tool_s
+        recompute = tokens / max(1, snap.prefill_tok_per_s)
+        offload = ctx_bytes / max(1, snap.mem_bw_bps)
+        if hold <= recompute:
+            return Disposition.RETAIN
+        if self.config.allow_offload and offload * 4 < hold:
+            return Disposition.OFFLOAD
+        return Disposition.DROP
+
     def _base(self, expected_tool_s: float) -> Disposition:
         if expected_tool_s < self.config.retain_max_s:
             return Disposition.RETAIN

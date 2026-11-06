@@ -10,12 +10,18 @@
   join 后回到 `REASONING`;并发 fork 用深度计数保证阶段正确。
 - 工作负载支持 `fanout` / `sub_rounds`,新增 `examples/workloads/w5-fanout.toml`。
 - `scripts/push.ps1`:本机沙箱下的推送脚本(openssl 后端 + 令牌头,不落盘)。
+- **K8**:`LeaseBroker` 支持 scope 配额,`fork(mode=ISOLATE)` 为子树开硬上限;
+  新增 `examples/workloads/w5-isolate.toml`。
+- **K3(实验)**:`SchedulerConfig.use_cost_model` 提供"容量代价 vs 重算代价"的决策器,默认关闭。
+
+### Changed
+
+- 实验结论:成本模型(B2c)显著劣于 slack 启发式,默认不启用,记录为负结果。
 
 ### 计划中
 
-- K3:把 `kv_waste` 接入调度目标并做消融
+- K9:不均衡子 Agent 负载,用于证明 ISOLATE 的保护价值
 - K6:B4 最优性间隙全量(E5)
-- K8:`ISOLATE` 子 Agent 模式的实验
 - M5:`VLLMBackend` / `OpenAICompatBackend`(需真实 GPU 产出 L3)
 
 ## [0.1.0] — 2026-11-07

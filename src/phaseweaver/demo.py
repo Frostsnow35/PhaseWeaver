@@ -22,6 +22,7 @@ from phaseweaver.policy import PinAlwaysPolicy, Scheduler, TtlEvictPolicy, Yield
 from phaseweaver.runtime import Runtime, RuntimeConfig
 from phaseweaver.scheduler import SchedulerConfig, SystemScheduler
 from phaseweaver.tools.base import ToolSpec
+from phaseweaver.types import ForkMode
 
 BYTES_PER_TOKEN = 57344  # Qwen2.5-7B bf16 KV per token
 BLOCK_TOKENS = 16
@@ -41,6 +42,7 @@ class Workload:
     rate_per_s: float
     fanout: int = 0
     sub_rounds: int = 0
+    fork_mode: str = "share"
 
     @classmethod
     def load(cls, path: Path) -> Workload:
@@ -59,6 +61,7 @@ class Workload:
             rate_per_s=float(a["rate_per_s"]),
             fanout=int(w.get("fanout", 0)),
             sub_rounds=int(w.get("sub_rounds", 0)),
+            fork_mode=str(w.get("fork_mode", "share")),
         )
 
 
@@ -83,6 +86,8 @@ def build_policy(name: str) -> Scheduler:
         return YieldOnToolPolicy()
     if name == "B2":
         return SystemScheduler(SchedulerConfig())
+    if name == "B2c":
+        return SystemScheduler(SchedulerConfig(use_cost_model=True))
     raise ValueError(f"unknown policy {name}")
 
 
@@ -135,9 +140,10 @@ async def run_one(
             prompt += workload.out_tokens  # a conversation grows every round
         if workload.fanout > 0:
             # Fork a group of subagents: the parent parks and waits (WAITING),
-            # children share the parent's budget, join merges the accounting.
+            # children share the parent's budget (SHARE) or get a hard cap (ISOLATE).
+            mode = ForkMode.ISOLATE if workload.fork_mode == "isolate" else ForkMode.SHARE
             await asyncio.gather(
-                *(handle.fork(f"sub-{i}", child) for i in range(workload.fanout))
+                *(handle.fork(f"sub-{i}", child, mode=mode) for i in range(workload.fanout))
             )
             await handle.reason(prompt_tokens=prompt, out_tokens=workload.out_tokens)
 

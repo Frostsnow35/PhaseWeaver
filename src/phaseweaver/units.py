@@ -37,6 +37,8 @@ class ExecutionUnit:
     arrival_ts: float = 0.0
     children: list[UnitId] = field(default_factory=list)
     aggregate: UnitAggregate = field(default_factory=UnitAggregate)
+    #: ISOLATE quota scope (K8); inherited by descendants, None = shared budget.
+    scope: str | None = None
     #: set while the runtime holds a lease state and phase state apart across an
     #: await (park/restore). Invariant checks skip such units; they are checked
     #: once quiescent.
@@ -94,6 +96,7 @@ class UnitRegistry:
         *,
         mode: ForkMode = ForkMode.SHARE,
         priority: int | None = None,
+        scope: str | None = None,
     ) -> ExecutionUnit:
         parent = self._units[parent_id]
         index = len(parent.children)
@@ -108,6 +111,7 @@ class UnitRegistry:
             priority=priority if priority is not None else parent.priority,
             deadline=parent.deadline,
             arrival_ts=self._clock.now(),
+            scope=scope if scope is not None else parent.scope,
         )
         self._units[unit_id] = unit
         parent.children.append(unit_id)
@@ -138,6 +142,7 @@ class UnitRegistry:
             priority=parent.priority,
             deadline=parent.deadline,
             arrival_ts=self._clock.now(),
+            scope=parent.scope,
         )
         self._units[unit_id] = unit
         parent.children.append(unit_id)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from phaseweaver.types import Disposition
@@ -17,6 +17,11 @@ class ClusterSnapshot:
     reasoning: int
     slack_by_unit: dict[str, float]
     recent_thrash: dict[str, int]
+    # --- cost-model inputs (K3) ---
+    resident_bytes_by_unit: dict[str, int] = field(default_factory=dict)
+    tokens_by_unit: dict[str, int] = field(default_factory=dict)
+    prefill_tok_per_s: int = 3200
+    mem_bw_bps: int = 12 * 1024**3
 
     @property
     def pressure(self) -> float:

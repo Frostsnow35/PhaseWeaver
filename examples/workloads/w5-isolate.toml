@@ -1,0 +1,21 @@
+[workload]
+name = "w5-isolate"
+# 与 w5-fanout 相同,但子 Agent 走 ISOLATE:每个子树 512 MiB 硬配额。
+agents = 6
+rounds = 2
+context_tokens = 4096
+out_tokens = 128
+slo_s = 180.0
+seed = 3
+fanout = 3
+sub_rounds = 2
+fork_mode = "isolate"
+
+[tool]
+kind = "python"
+p50_s = 3.0
+sigma = 0.5
+
+[arrival]
+kind = "poisson"
+rate_per_s = 0.3

@@ -52,3 +52,19 @@ def test_release_all_is_forced() -> None:
     broker.acquire("u2", "c2", LeaseKind.KV_BYTES, 100, priority=5)
     broker.release_all()
     assert broker.used(LeaseKind.KV_BYTES) == 0
+
+
+def test_scope_quota_caps_isolated_child() -> None:
+    broker = make_broker(10_000)
+    broker.open_scope("iso:1", 300)
+    assert broker.acquire("u1", "c1", LeaseKind.KV_BYTES, 300, 5, scope="iso:1") is not None
+    # over the scope limit even though global budget has room
+    assert broker.acquire("u1", "c1", LeaseKind.KV_BYTES, 100, 5, scope="iso:1") is None
+    assert broker.scope_usage("iso:1") == 300
+    broker.close_scope("iso:1")
+    assert broker.scope_limit("iso:1") is None
+
+
+def test_shared_scope_has_no_cap() -> None:
+    broker = make_broker(10_000)
+    assert broker.acquire("u1", "c1", LeaseKind.KV_BYTES, 900, 5, scope=None) is not None

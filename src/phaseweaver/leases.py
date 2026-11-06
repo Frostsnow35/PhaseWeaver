@@ -34,6 +34,8 @@ class Lease:
     priority: int
     expires_at: float | None = None
     active: bool = True
+    #: ISOLATE quota scope (K8). None means "shared with the whole run".
+    scope: str | None = None
 
 
 class LeaseBroker:
@@ -43,6 +45,8 @@ class LeaseBroker:
         self._budget = budget
         self._leases: dict[LeaseId, Lease] = {}
         self._seq = itertools.count(1)
+        #: ISOLATE quotas: scope id -> byte limit (K8).
+        self._scopes: dict[str, int] = {}
         #: set whenever capacity is returned; waiters await this instead of
         #: polling the clock (polling defeats the virtual clock's idle jump).
         self._capacity_event = asyncio.Event()
@@ -61,6 +65,24 @@ class LeaseBroker:
         # keeps the accounting honest without pretending it is GPU memory.
         return self._budget.total_bytes - self.used(kind)
 
+    def open_scope(self, scope_id: str, limit_bytes: int) -> None:
+        self._scopes[scope_id] = limit_bytes
+
+    def close_scope(self, scope_id: str) -> None:
+        self._scopes.pop(scope_id, None)
+
+    def scope_limit(self, scope_id: str | None) -> int | None:
+        if scope_id is None:
+            return None
+        return self._scopes.get(scope_id)
+
+    def scope_usage(self, scope_id: str) -> int:
+        return sum(
+            le.amount
+            for le in self._leases.values()
+            if le.active and le.scope == scope_id and le.kind is LeaseKind.KV_BYTES
+        )
+
     def acquire(
         self,
         unit_id: str,
@@ -69,12 +91,37 @@ class LeaseBroker:
         amount: int,
         priority: int,
         expires_at: float | None = None,
+        scope: str | None = None,
     ) -> Lease | None:
         self._journal.append(
             "lease_requested",
             unit_id=unit_id,
-            payload={"kind": kind.value, "amount": amount, "priority": priority},
+            payload={
+                "kind": kind.value,
+                "amount": amount,
+                "priority": priority,
+                "scope": scope,
+            },
         )
+        limit = self.scope_limit(scope)
+        over_quota = (
+            limit is not None
+            and scope is not None
+            and amount > limit - self.scope_usage(scope)
+        )
+        if over_quota:
+                self._journal.append(
+                    "admission_rejected",
+                    unit_id=unit_id,
+                    payload={
+                        "kind": kind.value,
+                        "amount": amount,
+                        "reason": "scope_quota",
+                        "scope": scope,
+                        "limit": limit,
+                    },
+                )
+                return None
         if amount > self.available(kind):
             self._journal.append(
                 "admission_rejected",
@@ -90,6 +137,7 @@ class LeaseBroker:
             amount=amount,
             priority=priority,
             expires_at=expires_at,
+            scope=scope,
         )
         self._leases[lease.lease_id] = lease
         self._journal.append(
@@ -114,7 +162,13 @@ class LeaseBroker:
         if lease is None or not lease.active:
             return False
         delta = new_amount - lease.amount
-        if delta > 0 and delta > self.available(lease.kind):
+        limit = self.scope_limit(lease.scope)
+        over_scope = (
+            limit is not None
+            and lease.scope is not None
+            and delta > limit - self.scope_usage(lease.scope)
+        )
+        if delta > 0 and (over_scope or delta > self.available(lease.kind)):
             return False
         old = lease.amount
         lease.amount = new_amount

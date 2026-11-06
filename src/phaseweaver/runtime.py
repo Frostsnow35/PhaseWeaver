@@ -37,6 +37,8 @@ class RuntimeConfig:
     strict_invariants: bool = True
     journal_path: Path | None = None
     default_expected_tool_s: float = 5.0
+    #: K8: hard cap for one ISOLATE child and its descendants.
+    isolate_quota_bytes: int = 512 * 1024**2
 
 
 @dataclass
@@ -61,8 +63,10 @@ class AgentHandle:
     async def call_tool(self, spec: ToolSpec, args: dict[str, Any]) -> ToolResult:
         return await self._rt.call_tool(self.unit, spec, args)
 
-    async def fork(self, label: str, fn: AgentFn) -> TaskOutcome:
-        return await self._rt.fork(self.unit, label, fn)
+    async def fork(
+        self, label: str, fn: AgentFn, *, mode: ForkMode = ForkMode.SHARE
+    ) -> TaskOutcome:
+        return await self._rt.fork(self.unit, label, fn, mode=mode)
 
 
 class Runtime:
@@ -154,14 +158,25 @@ class Runtime:
         slack = {
             u.unit_id: (u.deadline - now) if u.deadline is not None else 1e9 for u in units
         }
+        caps = self.backend.caps()
         return ClusterSnapshot(
             now=now,
-            capacity_bytes=self.backend.caps().capacity_bytes,
+            capacity_bytes=caps.capacity_bytes,
             resident_bytes=self.broker.used(LeaseKind.KV_BYTES),
             queued=sum(1 for u in units if u.phase is Phase.QUEUED),
             reasoning=sum(1 for u in units if u.phase is Phase.REASONING),
             slack_by_unit=slack,
             recent_thrash={u: len(v) for u, v in self._park_times.items()},
+            resident_bytes_by_unit={
+                u.unit_id: (u.context.resident_bytes if u.context is not None else 0)
+                for u in units
+            },
+            tokens_by_unit={
+                u.unit_id: (u.context.resident_tokens if u.context is not None else 0)
+                for u in units
+            },
+            prefill_tok_per_s=caps.prefill_tok_per_s,
+            mem_bw_bps=caps.mem_bw_bps,
         )
 
     async def reason(self, unit: ExecutionUnit, prompt_tokens: int, out_tokens: int) -> Any:
@@ -373,11 +388,22 @@ class Runtime:
         current = self._leases.get(unit.unit_id)
         if current is not None and current.active and current.amount == want:
             return
+        limit = self.broker.scope_limit(unit.scope)
+        if limit is not None and want > limit:
+            # A per-child cap cannot be satisfied by waiting for global capacity.
+            raise AdmissionRejected(
+                f"isolate quota {limit} < required {want} for {unit.unit_id}"
+            )
         deadline = self.clock.now() + wait_s
         while True:
             if current is None:
                 lease = self.broker.acquire(
-                    unit.unit_id, ctx.context_id, LeaseKind.KV_BYTES, want, unit.priority
+                    unit.unit_id,
+                    ctx.context_id,
+                    LeaseKind.KV_BYTES,
+                    want,
+                    unit.priority,
+                    scope=unit.scope,
                 )
                 if lease is not None:
                     self._leases[unit.unit_id] = lease
@@ -415,19 +441,41 @@ class Runtime:
         await self._release_unit(unit)
 
     # --- subagents ---------------------------------------------------------
-    async def fork(self, parent: ExecutionUnit, label: str, fn: AgentFn) -> TaskOutcome:
+    async def fork(
+        self,
+        parent: ExecutionUnit,
+        label: str,
+        fn: AgentFn,
+        *,
+        mode: ForkMode = ForkMode.SHARE,
+    ) -> TaskOutcome:
         """Run a child to completion while the parent waits.
 
         The parent must not hold an ACTIVE context while in WAITING (I1), so it
         parks first; the next reason() restores lazily. A depth counter keeps the
         phase correct when several children are forked concurrently.
+
+        ISOLATE (K8) gives the child tree its own hard quota so a runaway child
+        cannot starve its siblings; SHARE lets it borrow from the global budget.
         """
         parent_id = parent.unit_id
         depth = self._fork_depth.get(parent_id, 0)
+        scope_id: str | None = None
+        if mode is ForkMode.ISOLATE:
+            quota = self.config.isolate_quota_bytes
+            # A quota is a *carve-out of total capacity*, not a claim on what is
+            # free right now: otherwise forks fail precisely when the machine is
+            # busy, which is when isolation is supposed to help.
+            if quota > self.broker.budget.capacity():
+                raise AdmissionRejected(
+                    f"isolate quota {quota} exceeds total capacity for {label}"
+                )
+            scope_id = f"iso:{parent_id}:{depth}:{label}"
+            self.broker.open_scope(scope_id, quota)
         # Reserve the slot *before* any await: concurrent fork() calls must not
         # both try to park the same parent context.
         self._fork_depth[parent_id] = depth + 1
-        child = self.registry.fork(parent_id, label, mode=ForkMode.SHARE)
+        child = self.registry.fork(parent_id, label, mode=mode, scope=scope_id)
         started = self.clock.now()
         try:
             if depth == 0:
@@ -448,6 +496,8 @@ class Runtime:
             self.registry.join(child.unit_id)
         finally:
             self._fork_depth[parent_id] -= 1
+            if scope_id is not None:
+                self.broker.close_scope(scope_id)
             if self._fork_depth[parent_id] == 0 and parent.phase is Phase.WAITING:
                 self.registry.transition(parent_id, Phase.REASONING)
         return TaskOutcome(
