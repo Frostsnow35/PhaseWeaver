@@ -28,3 +28,5 @@ runs/
 probe*/
 pytest-cache-files-*/
 
+.gh-cache/
+

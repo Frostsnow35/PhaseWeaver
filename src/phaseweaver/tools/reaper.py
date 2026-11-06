@@ -32,7 +32,7 @@ def popen_kwargs() -> dict[str, object]:
 
 
 def _kernel32() -> Any:
-    windll = getattr(ctypes, "WinDLL")
+    windll = getattr(ctypes, "WinDLL")  # noqa: B009 - Windows-only symbol, must exist on POSIX type-check
     return windll("kernel32", use_last_error=True)
 
 
