@@ -23,6 +23,7 @@ PhaseWeaver 位于 Agent 编排框架与 LLM 推理引擎之间,把 Agent、Suba
 3. 子进程不能用管道捕获 stdio(会 `WinError 5`),工具执行走文件重定向。
 4. `taskkill` 在当前 token 下被拒绝,进程树回收改用 **Windows Job Object**。
 5. `tempfile.mkdtemp`(mode 0700)创建的目录不可写,私有临时目录用默认权限自建。
+6. `git push` 直接跑会失败(凭证管理器与 schannel 都被挡):用 `pwsh scripts/push.ps1`。
 
 ## 快速开始
 
