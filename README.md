@@ -10,7 +10,18 @@ PhaseWeaver 位于 Agent 编排框架与 LLM 推理引擎之间,把 Agent、Suba
 
 ## 当前状态
 
-第一阶段开发中。里程碑与完成判据见规格 §14。
+- M0–M3 完成:执行单元树、双状态机、租约/处置、全局 SLO 调度、mock 仿真、E1 CLI。
+- 测试:`50 passed`(unit / property / integration),`mypy --strict` 与 `ruff` 通过。
+- 实验:E1 已跑通,但**核心主张尚未成立**,原因与修复计划见 [docs/notes/experiments.md](docs/notes/experiments.md)。
+- 下一步:F1 租约 block 化 → F2 mock 算力竞争 → F3 背压重设计 → F4 主指标修正 → F5 全量重跑。
+
+## 本机环境注意事项(sandbox)
+
+1. `uv` 缓存需重定向:`$env:UV_CACHE_DIR=<repo>\.uv-cache`。
+2. 不使用 pytest 的 `tmp_path`:`%TEMP%` 与 `\\?\` 长路径在本机 sandbox 下不可访问。
+3. 子进程不能用管道捕获 stdio(会 `WinError 5`),工具执行走文件重定向。
+4. `taskkill` 在当前 token 下被拒绝,进程树回收改用 **Windows Job Object**。
+5. `tempfile.mkdtemp`(mode 0700)创建的目录不可写,私有临时目录用默认权限自建。
 
 ## 快速开始
 

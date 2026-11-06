@@ -37,6 +37,10 @@ class ExecutionUnit:
     arrival_ts: float = 0.0
     children: list[UnitId] = field(default_factory=list)
     aggregate: UnitAggregate = field(default_factory=UnitAggregate)
+    #: set while the runtime holds a lease state and phase state apart across an
+    #: await (park/restore). Invariant checks skip such units; they are checked
+    #: once quiescent.
+    busy: bool = False
 
     @property
     def is_terminal(self) -> bool:
@@ -55,7 +59,11 @@ class UnitRegistry:
     def create_root(
         self, label: str, *, priority: int = 5, deadline: float | None = None
     ) -> ExecutionUnit:
-        unit_id = f"{self._journal.run_id}/root"
+        # Concurrent tasks need distinct ids; a fixed "root" key would let tasks
+        # overwrite each other's state.
+        index = len(self._units)
+        root_count = sum(1 for u in self._units.values() if u.kind is UnitKind.AGENT)
+        unit_id = f"{self._journal.run_id}/root-{root_count}-{index}"
         unit = ExecutionUnit(
             unit_id=unit_id,
             run_id=self._journal.run_id,

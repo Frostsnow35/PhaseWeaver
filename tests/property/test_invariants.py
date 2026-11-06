@@ -1,6 +1,7 @@
 """I1 property test: random phase/state/amount combinations never violate I1 silently."""
 
-from hypothesis import given, settings, strategies as st
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from phaseweaver.clock import VirtualClock
 from phaseweaver.invariant import InvariantChecker

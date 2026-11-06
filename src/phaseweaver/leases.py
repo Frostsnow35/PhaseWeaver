@@ -48,12 +48,14 @@ class LeaseBroker:
         return self._budget
 
     def used(self, kind: LeaseKind) -> int:
-        return sum(l.amount for l in self._leases.values() if l.active and l.kind is kind)
+        return sum(le.amount for le in self._leases.values() if le.active and le.kind is kind)
 
     def available(self, kind: LeaseKind) -> int:
         if kind is LeaseKind.KV_BYTES:
             return self._budget.capacity() - self.used(kind)
-        return 1_000_000
+        # Offload lives on CPU/disk: bounded by the same nominal budget, which
+        # keeps the accounting honest without pretending it is GPU memory.
+        return self._budget.total_bytes - self.used(kind)
 
     def acquire(
         self,
@@ -110,7 +112,11 @@ class LeaseBroker:
         )
 
     def active_leases(self, kind: LeaseKind | None = None) -> list[Lease]:
-        return [l for l in self._leases.values() if l.active and (kind is None or l.kind is kind)]
+        return [
+            le
+            for le in self._leases.values()
+            if le.active and (kind is None or le.kind is kind)
+        ]
 
     def lease_for_context(self, context_id: str, kind: LeaseKind) -> Lease | None:
         for lease in self._leases.values():

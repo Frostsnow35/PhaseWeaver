@@ -53,9 +53,7 @@ class SystemScheduler:
         st = self._state(unit_id)
         if snap.pressure >= 0.98:
             return False
-        if snap.now - st.last_park_ts < self.config.park_cooldown_s:
-            return False
-        return True
+        return not (snap.now - st.last_park_ts < self.config.park_cooldown_s)
 
     def disposition_for(
         self, unit_id: str, snap: ClusterSnapshot, expected_tool_s: float

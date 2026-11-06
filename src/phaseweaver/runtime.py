@@ -133,7 +133,7 @@ class Runtime:
             err = "cancelled"
         except Exception as exc:  # noqa: BLE001
             if not unit.phase.is_terminal():
-                self.registry.transition(unit.unit_id, Phase.FAILED)
+                self.registry.transition(unit.unit_id, Phase.FAILED, reason=type(exc).__name__)
             err = f"{type(exc).__name__}: {exc}"
         finally:
             await self._release_unit(unit)
@@ -174,21 +174,32 @@ class Runtime:
             await self._activate(unit, ctx, prompt_tokens)
         handle = self._handles[unit.unit_id]
         stats = await self.backend.complete(handle, out_tokens)
-        self._set_context(unit, ctx, ContextState.ACTIVE, prompt_tokens + out_tokens)
-        self._sync_lease(unit, ctx)
+        tokens = prompt_tokens + out_tokens
+        await self._sync_lease(unit, ctx, self._lease_bytes(tokens))
+        self._set_context(unit, ctx, ContextState.ACTIVE, tokens)
         return stats
 
-    async def _activate(self, unit: ExecutionUnit, ctx: InferenceContext, prompt_tokens: int) -> None:
+    async def _activate(
+        self, unit: ExecutionUnit, ctx: InferenceContext, prompt_tokens: int
+    ) -> None:
         handle = self._handles.get(unit.unit_id)
         restored = None
-        if handle is None:
-            handle = await self.backend.submit(unit.unit_id, ctx.context_id, prompt_tokens)
-            self._handles[unit.unit_id] = handle
-        else:
-            self.journal.append("restore_started", unit_id=unit.unit_id)
-            restored = await self.backend.restore(handle)
-        self._set_context(unit, ctx, ContextState.ACTIVE, handle.resident_tokens or prompt_tokens)
-        self._sync_lease(unit, ctx)
+        want = self._lease_bytes(prompt_tokens)
+        unit.busy = True
+        try:
+            # Lease first: the engine allocation must never outrun the budget.
+            await self._sync_lease(unit, ctx, want)
+            if handle is None:
+                handle = await self.backend.submit(unit.unit_id, ctx.context_id, prompt_tokens)
+                self._handles[unit.unit_id] = handle
+            else:
+                self.journal.append("restore_started", unit_id=unit.unit_id)
+                restored = await self.backend.restore(handle)
+            self._set_context(
+                unit, ctx, ContextState.ACTIVE, handle.resident_tokens or prompt_tokens
+            )
+        finally:
+            unit.busy = False
         if restored is not None:
             unit.aggregate.recompute_tokens += restored.recompute_tokens
             self.journal.append(
@@ -218,7 +229,8 @@ class Runtime:
             ctx.resident_tokens = tokens
         if state in (ContextState.ACTIVE,):
             ctx.resident_bytes = ctx.resident_tokens * self.backend.caps().bytes_per_token
-        elif state in (ContextState.DROPPED, ContextState.RELEASED):
+        elif state in (ContextState.DROPPED, ContextState.RELEASED, ContextState.OFFLOADED):
+            # OFFLOADED still occupies CPU/disk, but nothing on the GPU.
             ctx.resident_bytes = 0
         self.journal.append(
             "context_state_changed",
@@ -268,25 +280,29 @@ class Runtime:
         handle = self._handles.get(unit.unit_id)
         if handle is None:
             return
-        self.journal.append(
-            "park_started", unit_id=unit.unit_id, payload={"disposition": disposition.value}
-        )
-        result = await self.backend.park(handle, disposition)
-        self._set_context(unit, ctx, self._state_for(result.applied))
-        if result.applied is Disposition.RETAIN:
-            pass  # I2: RETAINED must keep holding the KV lease
-        else:
-            lease = self._leases.pop(unit.unit_id, None)
-            if lease is not None:
-                self.broker.release(lease.lease_id, reason="park")
-        if result.applied is Disposition.OFFLOAD and result.moved_bytes > 0:
-            self.broker.acquire(
-                unit.unit_id,
-                ctx.context_id,
-                LeaseKind.OFFLOAD_BYTES,
-                result.moved_bytes,
-                unit.priority,
+        unit.busy = True
+        try:
+            self.journal.append(
+                "park_started", unit_id=unit.unit_id, payload={"disposition": disposition.value}
             )
+            result = await self.backend.park(handle, disposition)
+            self._set_context(unit, ctx, self._state_for(result.applied))
+            if result.applied is Disposition.RETAIN:
+                pass  # I2: RETAINED must keep holding the KV lease
+            else:
+                lease = self._leases.pop(unit.unit_id, None)
+                if lease is not None:
+                    self.broker.release(lease.lease_id, reason="park")
+            if result.applied is Disposition.OFFLOAD and result.moved_bytes > 0:
+                self.broker.acquire(
+                    unit.unit_id,
+                    ctx.context_id,
+                    LeaseKind.OFFLOAD_BYTES,
+                    result.moved_bytes,
+                    unit.priority,
+                )
+        finally:
+            unit.busy = False
         self.journal.append(
             "park_completed",
             unit_id=unit.unit_id,
@@ -298,9 +314,10 @@ class Runtime:
             },
         )
         recorder = getattr(self.policy, "record_park", None)
-        if recorder is not None:
+        if recorder is not None and result.applied is not Disposition.RETAIN:
             recorder(unit.unit_id, self.clock.now())
-        self._detect_thrash(unit)
+        if result.applied is not Disposition.RETAIN:
+            self._detect_thrash(unit)
 
     @staticmethod
     def _state_for(disposition: Disposition) -> ContextState:
@@ -329,20 +346,36 @@ class Runtime:
                 payload={"count": len(history), "window_s": window_s},
             )
 
-    def _sync_lease(self, unit: ExecutionUnit, ctx: InferenceContext) -> None:
-        want = ctx.resident_bytes
+    def _lease_bytes(self, tokens: int) -> int:
+        """Round up to engine block granularity so the byte budget and the
+        engine's block allocator can never disagree."""
+        caps = self.backend.caps()
+        blocks = (tokens + caps.block_tokens - 1) // caps.block_tokens
+        return blocks * caps.block_tokens * caps.bytes_per_token
+
+    async def _sync_lease(
+        self, unit: ExecutionUnit, ctx: InferenceContext, want: int, *, wait_s: float = 600.0
+    ) -> None:
+        """Acquire (or resize) the KV lease, queueing instead of failing under pressure."""
         current = self._leases.get(unit.unit_id)
         if current is not None and current.active and current.amount == want:
             return
+        # Release first: acquiring a bigger lease while still holding the old one
+        # deadlocks under pressure (classic resize leak).
         if current is not None:
             self.broker.release(current.lease_id, reason="resize")
             self._leases.pop(unit.unit_id, None)
-        lease = self.broker.acquire(
-            unit.unit_id, ctx.context_id, LeaseKind.KV_BYTES, want, unit.priority
-        )
-        if lease is None:
-            raise AdmissionRejected(f"kv budget exhausted for {unit.unit_id}")
-        self._leases[unit.unit_id] = lease
+        deadline = self.clock.now() + wait_s
+        while True:
+            lease = self.broker.acquire(
+                unit.unit_id, ctx.context_id, LeaseKind.KV_BYTES, want, unit.priority
+            )
+            if lease is not None:
+                self._leases[unit.unit_id] = lease
+                return
+            if self.clock.now() >= deadline:
+                raise AdmissionRejected(f"kv budget exhausted for {unit.unit_id}")
+            await self.clock.wait(0.05)
 
     async def _release_unit(self, unit: ExecutionUnit) -> None:
         self._leases.pop(unit.unit_id, None)

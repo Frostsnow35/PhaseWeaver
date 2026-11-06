@@ -64,7 +64,7 @@ class InvariantChecker:
         out: list[Violation] = []
         for unit in self._registry.all_units():
             ctx = unit.context
-            if ctx is None:
+            if ctx is None or unit.busy:
                 continue
             if unit.phase in NON_GPU_PHASES and ctx.state is ContextState.ACTIVE:
                 out.append(Violation("I1", unit.unit_id, f"{unit.phase} holds ACTIVE context"))
@@ -75,7 +75,7 @@ class InvariantChecker:
         out: list[Violation] = []
         for unit in self._registry.all_units():
             ctx = unit.context
-            if ctx is None:
+            if ctx is None or unit.busy:
                 continue
             lease = self._broker.lease_for_context(ctx.context_id, LeaseKind.KV_BYTES)
             occupied = ctx.state in (ContextState.ACTIVE, ContextState.RETAINED)
@@ -99,7 +99,7 @@ class InvariantChecker:
         for unit in self._registry.all_units():
             if not unit.phase.is_terminal():
                 continue
-            held = [l for l in self._broker.active_leases() if l.unit_id == unit.unit_id]
+            held = [le for le in self._broker.active_leases() if le.unit_id == unit.unit_id]
             if held:
                 out.append(Violation("I4", unit.unit_id, f"{len(held)} leases after terminal"))
             if unit.context is not None and unit.context.state is not ContextState.RELEASED:
@@ -115,9 +115,10 @@ class InvariantChecker:
         out: list[Violation] = []
         now = self._clock.now()
         for unit in self._registry.all_units():
-            if unit.phase is Phase.QUEUED and unit.deadline is not None:
-                if now > unit.deadline + 60.0:
-                    out.append(
-                        Violation("I8", unit.unit_id, "queued beyond deadline + 60s")
-                    )
+            if (
+                unit.phase is Phase.QUEUED
+                and unit.deadline is not None
+                and now > unit.deadline + 60.0
+            ):
+                out.append(Violation("I8", unit.unit_id, "queued beyond deadline + 60s"))
         return out
