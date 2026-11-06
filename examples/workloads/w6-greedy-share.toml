@@ -1,0 +1,24 @@
+[workload]
+name = "w6-greedy-share"
+# 不均衡对抗负载:每个父 Agent fork 3 个子 Agent,其中第 1 个是"贪婪子"
+# (上下文 ×6、轮数相同),用来验证 ISOLATE 是否能保护兄弟节点。
+agents = 6
+rounds = 2
+context_tokens = 2048
+out_tokens = 128
+slo_s = 240.0
+seed = 5
+fanout = 3
+sub_rounds = 3
+sub_context_tokens = 1024
+greedy_factor = 6.0
+fork_mode = "share"
+
+[tool]
+kind = "python"
+p50_s = 3.0
+sigma = 0.5
+
+[arrival]
+kind = "poisson"
+rate_per_s = 0.4

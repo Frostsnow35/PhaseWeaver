@@ -1,0 +1,23 @@
+[workload]
+name = "w6-greedy-isolate"
+# 与 w6-greedy-share 相同,但子 Agent 走 ISOLATE(每子树 512 MiB 硬配额)。
+agents = 6
+rounds = 2
+context_tokens = 2048
+out_tokens = 128
+slo_s = 240.0
+seed = 5
+fanout = 3
+sub_rounds = 3
+sub_context_tokens = 1024
+greedy_factor = 6.0
+fork_mode = "isolate"
+
+[tool]
+kind = "python"
+p50_s = 3.0
+sigma = 0.5
+
+[arrival]
+kind = "poisson"
+rate_per_s = 0.4

@@ -43,6 +43,8 @@ class Workload:
     fanout: int = 0
     sub_rounds: int = 0
     fork_mode: str = "share"
+    sub_context_tokens: int = 0
+    greedy_factor: float = 1.0
 
     @classmethod
     def load(cls, path: Path) -> Workload:
@@ -62,6 +64,8 @@ class Workload:
             fanout=int(w.get("fanout", 0)),
             sub_rounds=int(w.get("sub_rounds", 0)),
             fork_mode=str(w.get("fork_mode", "share")),
+            sub_context_tokens=int(w.get("sub_context_tokens", 0)),
+            greedy_factor=float(w.get("greedy_factor", 1.0)),
         )
 
 
@@ -122,8 +126,9 @@ async def run_one(
         for i in range(workload.rounds)
     ]
 
-    async def child(handle: Any) -> None:
-        prompt = workload.context_tokens // 2
+    async def child(handle: Any, greedy: bool = False) -> None:
+        base = workload.sub_context_tokens or workload.context_tokens // 2
+        prompt = int(base * (workload.greedy_factor if greedy else 1.0))
         for _ in range(workload.sub_rounds):
             await handle.reason(prompt_tokens=prompt, out_tokens=workload.out_tokens)
             await handle.call_tool(
@@ -143,7 +148,10 @@ async def run_one(
             # children share the parent's budget (SHARE) or get a hard cap (ISOLATE).
             mode = ForkMode.ISOLATE if workload.fork_mode == "isolate" else ForkMode.SHARE
             await asyncio.gather(
-                *(handle.fork(f"sub-{i}", child, mode=mode) for i in range(workload.fanout))
+                *(
+                    handle.fork(f"sub-{i}", lambda h, g=(i == 0): child(h, g), mode=mode)
+                    for i in range(workload.fanout)
+                )
             )
             await handle.reason(prompt_tokens=prompt, out_tokens=workload.out_tokens)
 

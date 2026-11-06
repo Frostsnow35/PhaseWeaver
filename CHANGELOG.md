@@ -13,15 +13,23 @@
 - **K8**:`LeaseBroker` 支持 scope 配额,`fork(mode=ISOLATE)` 为子树开硬上限;
   新增 `examples/workloads/w5-isolate.toml`。
 - **K3(实验)**:`SchedulerConfig.use_cost_model` 提供"容量代价 vs 重算代价"的决策器,默认关闭。
+- 指标新增 `jain_fairness`,用于观察不均衡负载下的公平性。
+- `examples/workloads/w6-greedy*.toml`:不均衡/贪婪子 Agent 的对抗负载。
 
 ### Changed
 
 - 实验结论:成本模型(B2c)显著劣于 slack 启发式,默认不启用,记录为负结果。
+- **ISOLATE 语义**:子单元因配额失败时不再杀死父任务,异常在 `fork()` 边界内被收敛。
+
+### Known issues
+
+- K6:B4 下界与 α 吞吐模型不自洽,optimality gap 暂不可引用。
+- K11:被配额拒绝的子单元没有降级重试。
 
 ### 计划中
 
-- K9:不均衡子 Agent 负载,用于证明 ISOLATE 的保护价值
-- K6:B4 最优性间隙全量(E5)
+- K11:被配额拒绝的子单元支持降级重试(缩小上下文)
+- K6:按 α 共享吞吐模型重做 B4 下界
 - M5:`VLLMBackend` / `OpenAICompatBackend`(需真实 GPU 产出 L3)
 
 ## [0.1.0] — 2026-11-07

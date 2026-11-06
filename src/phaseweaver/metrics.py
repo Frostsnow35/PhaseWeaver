@@ -80,6 +80,15 @@ class RunReport:
         minutes = self.wall_clock_s / 60.0
         return (self.thrash_count / minutes) if minutes > 0 else 0.0
 
+    @property
+    def jain_fairness(self) -> float:
+        """Jain index over task latencies: 1.0 = perfectly equal, 1/n = one hog."""
+        if len(self.latencies_ms) < 2:
+            return 1.0
+        total = sum(self.latencies_ms)
+        sq = sum(v * v for v in self.latencies_ms)
+        return (total * total) / (len(self.latencies_ms) * sq) if sq else 1.0
+
     def summary_row(self) -> dict[str, float]:
         return {
             "completed": float(self.completed),
@@ -94,6 +103,7 @@ class RunReport:
             "peak_kv_mib": round(self.peak_resident_bytes / 1024 / 1024, 1),
             "idle_waste_mib_s": round(self.gpu_idle_wasted_bytes_s / 1024 / 1024, 1),
             "kv_waste_mib_s": round(self.kv_occupancy_waste_bytes_s / 1024 / 1024, 1),
+            "jain": round(self.jain_fairness, 3),
         }
 
 

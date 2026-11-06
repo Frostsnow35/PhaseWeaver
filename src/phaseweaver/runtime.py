@@ -489,7 +489,21 @@ class Runtime:
                 if parent.phase is Phase.REASONING:
                     self.registry.transition(parent_id, Phase.WAITING)
             self.registry.transition(child.unit_id, Phase.QUEUED)
-            await fn(AgentHandle(self, child))
+            try:
+                await fn(AgentHandle(self, child))
+            except AdmissionRejected as exc:
+                # A child that cannot fit its own quota is contained here: the
+                # parent keeps running and the siblings keep their capacity.
+                if not child.phase.is_terminal():
+                    self.registry.transition(child.unit_id, Phase.FAILED, reason="quota")
+                await self._release_unit(child)
+                self.registry.join(child.unit_id)
+                return TaskOutcome(
+                    unit_id=child.unit_id,
+                    phase=child.phase.value,
+                    latency_ms=(self.clock.now() - started) * 1000,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
             if not child.phase.is_terminal():
                 self.registry.transition(child.unit_id, Phase.COMPLETED)
             await self._release_unit(child)
