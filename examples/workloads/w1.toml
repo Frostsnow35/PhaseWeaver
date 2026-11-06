@@ -1,0 +1,17 @@
+[workload]
+name = "w1"
+agents = 12
+rounds = 4
+context_tokens = 8192
+out_tokens = 128
+slo_s = 120.0
+seed = 7
+
+[tool]
+kind = "python"
+p50_s = 2.0
+sigma = 0.6
+
+[arrival]
+kind = "poisson"
+rate_per_s = 0.5

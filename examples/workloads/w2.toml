@@ -1,0 +1,17 @@
+[workload]
+name = "w2"
+agents = 12
+rounds = 4
+context_tokens = 3072
+out_tokens = 128
+slo_s = 300.0
+seed = 11
+
+[tool]
+kind = "mixed"
+p50_s = 12.0
+sigma = 1.1
+
+[arrival]
+kind = "poisson"
+rate_per_s = 0.35
