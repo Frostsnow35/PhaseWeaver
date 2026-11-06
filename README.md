@@ -12,8 +12,8 @@ PhaseWeaver 位于 Agent 编排框架与 LLM 推理引擎之间,把 Agent、Suba
 
 - M0–M3 完成:执行单元树、双状态机、租约/处置、全局 SLO 调度、mock 仿真、E1 CLI。
 - 测试:`50 passed`(unit / property / integration),`mypy --strict` 与 `ruff` 通过。
-- 实验:K1 已修复。过载场景(12 Agent / 4 GiB / SLO 70 s,3 seeds)B2 相对 B0:SLO 达成率 0.722→**0.778**、goodput +19%、p99 82.1→**76.7 s**、延迟抖动 −45%;容量匹配时让出是纯成本(如实记录)。
-- 下一步:K2 跑满 E2–E4(突发/容量扫描/20 seed)→ K3 把 `kv_waste` 接进调度目标 → M5 真实引擎适配。
+- 实验:[L1/L2] 容量越紧优势越大。2/4/8 GiB 扫描中 B2 在三个容量点同时优于 B0(goodput +16.7%/+4.7%/+0.5%,p99 −7.5%/−1.6%/−1.6%);3× 突发下 p99 −16.4%;容量充足时让出是纯成本(如实记录)。
+- 下一步:K3 `kv_waste` 接入调度目标 → K5 定位 2 GiB 偶发 p99 异常 → K6 B4 全量 → M5 真实引擎适配。
 - 详见 [docs/notes/experiments.md](docs/notes/experiments.md)。
 
 ## 本机环境注意事项(sandbox)
