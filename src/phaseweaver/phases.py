@@ -24,7 +24,14 @@ PHASE_TRANSITIONS: Final[dict[Phase, frozenset[Phase]]] = {
             Phase.CANCELLED,
         }
     ),
-    Phase.ACTING: frozenset({Phase.REASONING, Phase.FAILED, Phase.CANCELLED}),
+    Phase.ACTING: frozenset(
+        {
+            Phase.REASONING,
+            Phase.COMPLETED,  # TOOL_CALL only: the tool finished successfully
+            Phase.FAILED,
+            Phase.CANCELLED,
+        }
+    ),
     Phase.WAITING: frozenset({Phase.REASONING, Phase.FAILED, Phase.CANCELLED}),
     Phase.COMPLETED: frozenset(),
     Phase.FAILED: frozenset(),
@@ -64,8 +71,12 @@ NON_GPU_PHASES: Final[frozenset[Phase]] = frozenset(
 def check_phase_transition(src: Phase, dst: Phase, *, kind: UnitKind | None = None) -> None:
     if dst not in PHASE_TRANSITIONS[src]:
         raise IllegalTransition("phase", str(src), str(dst))
-    if src is Phase.PENDING and dst is Phase.ACTING and kind is not UnitKind.TOOL_CALL:
-        raise IllegalTransition("phase(kind=non-tool)", str(src), str(dst))
+    tool_only = (
+        (src is Phase.PENDING and dst is Phase.ACTING)
+        or (src is Phase.ACTING and dst is Phase.COMPLETED)
+    )
+    if tool_only and kind is not UnitKind.TOOL_CALL:
+        raise IllegalTransition("phase(agent)", str(src), str(dst))
 
 
 def check_context_transition(src: ContextState, dst: ContextState) -> None:
