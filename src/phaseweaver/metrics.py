@@ -138,7 +138,9 @@ class MetricsReducer:
                     arrived, deadline = arrivals.pop(ev.unit_id)
                     latency_ms = (ev.ts - arrived) * 1000
                     report.latencies_ms.append(latency_ms)
-                    hit = latency_ms <= deadline * 1000 if deadline > 0 else True
+                    # deadline is an absolute clock value; compare the finish time
+                    # against it (comparing a duration against it would always pass).
+                    hit = (ev.ts <= deadline) if deadline > 0 else True
                     if to == "COMPLETED":
                         report.completed += 1
                         if hit:

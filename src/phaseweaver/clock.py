@@ -34,7 +34,7 @@ class VirtualClock:
     clock jumps to the earliest pending timer. Same seed => same event order.
     """
 
-    def __init__(self, start: float = 0.0, idle_rounds: int = 64) -> None:
+    def __init__(self, start: float = 0.0, idle_rounds: int = 4) -> None:
         self._now = start
         self._heap: list[tuple[float, int, asyncio.Future[None]]] = []
         self._seq = itertools.count()

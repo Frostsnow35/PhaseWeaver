@@ -362,7 +362,13 @@ class Runtime:
     async def _sync_lease(
         self, unit: ExecutionUnit, ctx: InferenceContext, want: int, *, wait_s: float = 600.0
     ) -> None:
-        """Acquire (or resize) the KV lease, queueing instead of failing under pressure."""
+        """Acquire (or atomically resize) the KV lease.
+
+        Under pressure every resident unit wants to grow at the same time and
+        nobody can, which deadlocks until the deadline (K1). The escape hatch:
+        a unit that already holds a lease drops its own context (recompute later)
+        so it can take the larger lease, instead of blocking everyone.
+        """
         current = self._leases.get(unit.unit_id)
         if current is not None and current.active and current.amount == want:
             return
@@ -376,16 +382,18 @@ class Runtime:
                     self._leases[unit.unit_id] = lease
                     return
             else:
-                # Atomic resize: the lease never disappears, so engine blocks and
-                # leased bytes stay in lockstep (F1).
+                # Atomic resize: the lease never disappears (F1).
                 if self.broker.resize(current.lease_id, want):
                     return
+                if want > current.amount and self.snapshot().pressure > 0.6:
+                    # Self-yield: give the blocks back rather than deadlock.
+                    self.broker.release(current.lease_id, reason="grow_self_drop")
+                    self._leases.pop(unit.unit_id, None)
+                    current = None
+                    continue
             if self.clock.now() >= deadline:
                 raise AdmissionRejected(f"kv budget exhausted for {unit.unit_id}")
-            # Event-driven first (no clock polling, which would stop the virtual
-            # clock from jumping); the short real-time cap only re-checks the
-            # virtual deadline when nothing is released.
-            await self.broker.wait_for_capacity(timeout_s=0.05)
+            await self.clock.wait(0.05)
 
     async def _release_unit(self, unit: ExecutionUnit) -> None:
         # Free the engine allocation too: releasing only the lease leaks blocks

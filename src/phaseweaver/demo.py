@@ -96,7 +96,7 @@ async def run_one(
     runtime = Runtime(
         backend=backend,
         clock=clock,
-        budget=Budget(total_bytes=backend_caps.capacity_bytes, headroom_frac=0.0),
+        budget=Budget(total_bytes=backend_caps.capacity_bytes, headroom_frac=0.05),
         policy=build_policy(policy_name),
         config=RuntimeConfig(run_id=f"{workload.name}-{policy_name}", journal_path=journal_path),
     )
