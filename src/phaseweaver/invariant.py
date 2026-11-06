@@ -64,7 +64,7 @@ class InvariantChecker:
         out: list[Violation] = []
         for unit in self._registry.all_units():
             ctx = unit.context
-            if ctx is None or unit.busy:
+            if ctx is None or unit.busy > 0:
                 continue
             if unit.phase in NON_GPU_PHASES and ctx.state is ContextState.ACTIVE:
                 out.append(Violation("I1", unit.unit_id, f"{unit.phase} holds ACTIVE context"))
@@ -75,7 +75,7 @@ class InvariantChecker:
         out: list[Violation] = []
         for unit in self._registry.all_units():
             ctx = unit.context
-            if ctx is None or unit.busy:
+            if ctx is None or unit.busy > 0:
                 continue
             lease = self._broker.lease_for_context(ctx.context_id, LeaseKind.KV_BYTES)
             occupied = ctx.state in (ContextState.ACTIVE, ContextState.RETAINED)

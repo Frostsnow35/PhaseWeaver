@@ -154,6 +154,21 @@ class MockBackend:
             latency_ms=(self._clock.now() - start) * 1000,
         )
 
+    async def truncate(self, handle: Handle, tokens: int) -> int:
+        """Shrink the allocation in place; the dropped blocks return to the pool."""
+        target = max(1, min(tokens, handle.resident_tokens))
+        blocks = (target + self._caps.block_tokens - 1) // self._caps.block_tokens
+        alloc = self._allocs.get(handle.context_id)
+        if alloc is not None:
+            delta = alloc.blocks - blocks
+            if delta > 0:
+                alloc.blocks = blocks
+                alloc.tokens = target
+                self._used_blocks -= delta
+                self._emit(EngineEventKind.BLOCK_REMOVED, handle.context_id, delta)
+        handle.resident_tokens = target
+        return target
+
     # --- internals --------------------------------------------------------
     def _block_bytes(self) -> int:
         return self._caps.block_tokens * self._caps.bytes_per_token

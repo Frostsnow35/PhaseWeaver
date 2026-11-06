@@ -74,3 +74,16 @@ def test_offload_moves_bytes_with_cost() -> None:
         assert "block_removed" in events
 
     asyncio.run(scenario())
+
+
+def test_truncate_shrinks_and_frees_blocks() -> None:
+    async def scenario() -> None:
+        backend = make()
+        handle = await backend.submit("u1", "c1", 64)
+        before = backend.available_bytes()
+        new_tokens = await backend.truncate(handle, 32)
+        assert new_tokens == 32
+        assert handle.resident_tokens == 32
+        assert backend.available_bytes() > before
+
+    asyncio.run(scenario())

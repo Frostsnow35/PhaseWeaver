@@ -42,7 +42,7 @@ class ExecutionUnit:
     #: set while the runtime holds a lease state and phase state apart across an
     #: await (park/restore). Invariant checks skip such units; they are checked
     #: once quiescent.
-    busy: bool = False
+    busy: int = 0
 
     @property
     def is_terminal(self) -> bool:

@@ -39,6 +39,12 @@ class RuntimeConfig:
     default_expected_tool_s: float = 5.0
     #: K8: hard cap for one ISOLATE child and its descendants.
     isolate_quota_bytes: int = 512 * 1024**2
+    #: K11: when a quota cannot hold the whole context, compact instead of failing.
+    compact_on_quota: bool = True
+    #: Simulate tools against the virtual clock instead of spawning subprocesses.
+    #: Deterministic and faithful to the declared tool latency; set False only when
+    #: running against a real engine.
+    simulate_tools: bool = True
 
 
 @dataclass
@@ -87,7 +93,9 @@ class Runtime:
         self.registry = UnitRegistry(journal=self.journal, clock=clock)
         self.broker = LeaseBroker(journal=self.journal, clock=clock, budget=budget)
         self.policy = policy
-        self.supervisor = ToolSupervisor(self.journal)
+        self.supervisor = ToolSupervisor(
+            self.journal, clock=clock, simulated=self.config.simulate_tools
+        )
         self.checker = InvariantChecker(
             registry=self.registry,
             broker=self.broker,
@@ -202,8 +210,18 @@ class Runtime:
     ) -> None:
         handle = self._handles.get(unit.unit_id)
         restored = None
+        cap_tokens = self._max_tokens_for(unit)
+        if cap_tokens is not None and reserve_tokens > cap_tokens:
+            # K11: do not fail an oversized child - compact its context instead.
+            prompt_tokens = min(prompt_tokens, cap_tokens)
+            reserve_tokens = min(reserve_tokens, cap_tokens)
+            self.journal.append(
+                "context_compacted",
+                unit_id=unit.unit_id,
+                payload={"to_tokens": reserve_tokens, "reason": "scope_quota"},
+            )
         want = self._lease_bytes(reserve_tokens)
-        unit.busy = True
+        unit.busy += 1
         try:
             # Lease first: the engine allocation must never outrun the budget.
             await self._sync_lease(unit, ctx, want)
@@ -217,7 +235,7 @@ class Runtime:
                 unit, ctx, ContextState.ACTIVE, handle.resident_tokens or prompt_tokens
             )
         finally:
-            unit.busy = False
+            unit.busy -= 1
         if restored is not None:
             unit.aggregate.recompute_tokens += restored.recompute_tokens
             self.journal.append(
@@ -302,7 +320,7 @@ class Runtime:
         handle = self._handles.get(unit.unit_id)
         if handle is None:
             return
-        unit.busy = True
+        unit.busy += 1
         try:
             self.journal.append(
                 "park_started", unit_id=unit.unit_id, payload={"disposition": disposition.value}
@@ -324,7 +342,7 @@ class Runtime:
                     unit.priority,
                 )
         finally:
-            unit.busy = False
+            unit.busy -= 1
         self.journal.append(
             "park_completed",
             unit_id=unit.unit_id,
@@ -375,6 +393,15 @@ class Runtime:
         blocks = (tokens + caps.block_tokens - 1) // caps.block_tokens
         return blocks * caps.block_tokens * caps.bytes_per_token
 
+    def _max_tokens_for(self, unit: ExecutionUnit) -> int | None:
+        """Largest context the unit's own quota can hold, in tokens."""
+        limit = self.broker.scope_limit(unit.scope)
+        if limit is None:
+            return None
+        caps = self.backend.caps()
+        blocks = limit // (caps.block_tokens * caps.bytes_per_token)
+        return max(caps.block_tokens, blocks * caps.block_tokens)
+
     async def _sync_lease(
         self, unit: ExecutionUnit, ctx: InferenceContext, want: int, *, wait_s: float = 600.0
     ) -> None:
@@ -390,9 +417,20 @@ class Runtime:
             return
         limit = self.broker.scope_limit(unit.scope)
         if limit is not None and want > limit:
-            # A per-child cap cannot be satisfied by waiting for global capacity.
-            raise AdmissionRejected(
-                f"isolate quota {limit} < required {want} for {unit.unit_id}"
+            handle = self._handles.get(unit.unit_id)
+            cap_tokens = self._max_tokens_for(unit)
+            if not self.config.compact_on_quota or handle is None or not cap_tokens:
+                # A per-child cap cannot be satisfied by waiting for global capacity.
+                raise AdmissionRejected(
+                    f"isolate quota {limit} < required {want} for {unit.unit_id}"
+                )
+            new_tokens = await self.backend.truncate(handle, cap_tokens)
+            ctx.resident_tokens = new_tokens
+            want = self._lease_bytes(new_tokens)
+            self.journal.append(
+                "context_compacted",
+                unit_id=unit.unit_id,
+                payload={"to_tokens": new_tokens, "reason": "scope_quota_grow"},
             )
         deadline = self.clock.now() + wait_s
         while True:
@@ -423,17 +461,32 @@ class Runtime:
             await self.clock.wait(0.05)
 
     async def _release_unit(self, unit: ExecutionUnit) -> None:
-        # Free the engine allocation too: releasing only the lease leaks blocks
-        # and the engine fills up while the budget looks empty.
-        handle = self._handles.pop(unit.unit_id, None)
-        if handle is not None:
-            await self.backend.abort(handle, "unit_end")
-        self._leases.pop(unit.unit_id, None)
-        for lease in self.broker.active_leases():
-            if lease.unit_id == unit.unit_id:
-                self.broker.release(lease.lease_id, reason="unit_end")
-        if unit.context is not None and unit.context.state is not ContextState.RELEASED:
-            self._set_context(unit, unit.context, ContextState.RELEASED)
+        # Bookkeeping first, engine call last: the invariant checker must never
+        # observe a terminal unit that still holds a lease (I4) or a lease without
+        # residency (I2) while we await the backend.
+        #
+        # Recurse into descendants: a child left mid-flight by a failed parent
+        # would otherwise leak its lease forever (I5).
+        targets = [self.registry.get(uid) for uid in self.registry.descendants(unit.unit_id)]
+        for target in reversed(targets + [unit]):
+            await self._release_one(target)
+
+    async def _release_one(self, unit: ExecutionUnit) -> None:
+        unit.busy += 1
+        try:
+            if not unit.phase.is_terminal():
+                self.registry.transition(unit.unit_id, Phase.CANCELLED, reason="parent_released")
+            self._leases.pop(unit.unit_id, None)
+            for lease in self.broker.active_leases():
+                if lease.unit_id == unit.unit_id:
+                    self.broker.release(lease.lease_id, reason="unit_end")
+            if unit.context is not None and unit.context.state is not ContextState.RELEASED:
+                self._set_context(unit, unit.context, ContextState.RELEASED)
+            handle = self._handles.pop(unit.unit_id, None)
+            if handle is not None:
+                await self.backend.abort(handle, "unit_end")
+        finally:
+            unit.busy -= 1
 
     async def cancel(self, unit: ExecutionUnit, reason: str = "cancelled") -> None:
         if not unit.phase.is_terminal():
