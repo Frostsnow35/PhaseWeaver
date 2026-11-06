@@ -39,6 +39,8 @@ class Workload:
     tool_p50_s: float
     tool_sigma: float
     rate_per_s: float
+    fanout: int = 0
+    sub_rounds: int = 0
 
     @classmethod
     def load(cls, path: Path) -> Workload:
@@ -55,6 +57,8 @@ class Workload:
             tool_p50_s=float(t["p50_s"]),
             tool_sigma=float(t["sigma"]),
             rate_per_s=float(a["rate_per_s"]),
+            fanout=int(w.get("fanout", 0)),
+            sub_rounds=int(w.get("sub_rounds", 0)),
         )
 
 
@@ -113,12 +117,29 @@ async def run_one(
         for i in range(workload.rounds)
     ]
 
+    async def child(handle: Any) -> None:
+        prompt = workload.context_tokens // 2
+        for _ in range(workload.sub_rounds):
+            await handle.reason(prompt_tokens=prompt, out_tokens=workload.out_tokens)
+            await handle.call_tool(
+                ToolSpec("sub-tool", "python", expected_duration_s=workload.tool_p50_s),
+                {"code": "pass"},
+            )
+            prompt += workload.out_tokens
+
     async def agent(handle: Any) -> None:
         prompt = workload.context_tokens
         for spec in tools:
             await handle.reason(prompt_tokens=prompt, out_tokens=workload.out_tokens)
             await handle.call_tool(spec, {"code": "pass"})
             prompt += workload.out_tokens  # a conversation grows every round
+        if workload.fanout > 0:
+            # Fork a group of subagents: the parent parks and waits (WAITING),
+            # children share the parent's budget, join merges the accounting.
+            await asyncio.gather(
+                *(handle.fork(f"sub-{i}", child) for i in range(workload.fanout))
+            )
+            await handle.reason(prompt_tokens=prompt, out_tokens=workload.out_tokens)
 
     pending: list[asyncio.Task[Any]] = []
     for i in range(workload.agents):

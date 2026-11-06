@@ -94,6 +94,7 @@ class Runtime:
         self._handles: dict[UnitId, Any] = {}
         self._leases: dict[UnitId, Lease] = {}
         self._park_times: dict[UnitId, list[float]] = {}
+        self._fork_depth: dict[UnitId, int] = {}
         self._started = False
 
     # --- lifecycle ---------------------------------------------------------
@@ -415,14 +416,40 @@ class Runtime:
 
     # --- subagents ---------------------------------------------------------
     async def fork(self, parent: ExecutionUnit, label: str, fn: AgentFn) -> TaskOutcome:
-        child = self.registry.fork(parent.unit_id, label, mode=ForkMode.SHARE)
+        """Run a child to completion while the parent waits.
+
+        The parent must not hold an ACTIVE context while in WAITING (I1), so it
+        parks first; the next reason() restores lazily. A depth counter keeps the
+        phase correct when several children are forked concurrently.
+        """
+        parent_id = parent.unit_id
+        depth = self._fork_depth.get(parent_id, 0)
+        # Reserve the slot *before* any await: concurrent fork() calls must not
+        # both try to park the same parent context.
+        self._fork_depth[parent_id] = depth + 1
+        child = self.registry.fork(parent_id, label, mode=ForkMode.SHARE)
         started = self.clock.now()
-        self.registry.transition(child.unit_id, Phase.QUEUED)
-        await fn(AgentHandle(self, child))
-        if not child.phase.is_terminal():
-            self.registry.transition(child.unit_id, Phase.COMPLETED)
-        await self._release_unit(child)
-        self.registry.join(child.unit_id)
+        try:
+            if depth == 0:
+                ctx = parent.context
+                if ctx is not None and ctx.state is ContextState.ACTIVE:
+                    expected = self.config.default_expected_tool_s
+                    disposition = self.policy.disposition_for(
+                        parent_id, self.snapshot(), expected
+                    )
+                    await self._park(parent, ctx, disposition)
+                if parent.phase is Phase.REASONING:
+                    self.registry.transition(parent_id, Phase.WAITING)
+            self.registry.transition(child.unit_id, Phase.QUEUED)
+            await fn(AgentHandle(self, child))
+            if not child.phase.is_terminal():
+                self.registry.transition(child.unit_id, Phase.COMPLETED)
+            await self._release_unit(child)
+            self.registry.join(child.unit_id)
+        finally:
+            self._fork_depth[parent_id] -= 1
+            if self._fork_depth[parent_id] == 0 and parent.phase is Phase.WAITING:
+                self.registry.transition(parent_id, Phase.REASONING)
         return TaskOutcome(
             unit_id=child.unit_id,
             phase=child.phase.value,

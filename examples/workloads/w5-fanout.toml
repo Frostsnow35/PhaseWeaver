@@ -1,0 +1,20 @@
+[workload]
+name = "w5-fanout"
+# 扇出场景:每个父 Agent 先跑 2 轮,再 fork 3 个子 Agent(各 2 轮),join 后收尾 1 轮。
+agents = 6
+rounds = 2
+context_tokens = 4096
+out_tokens = 128
+slo_s = 180.0
+seed = 3
+fanout = 3
+sub_rounds = 2
+
+[tool]
+kind = "python"
+p50_s = 3.0
+sigma = 0.5
+
+[arrival]
+kind = "poisson"
+rate_per_s = 0.3

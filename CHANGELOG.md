@@ -4,12 +4,18 @@
 
 ## [Unreleased]
 
+### Added
+
+- 子 Agent 扇出:`Runtime.fork()` 现在会让父单元先 park 上下文并进入 `WAITING`(满足 I1),
+  join 后回到 `REASONING`;并发 fork 用深度计数保证阶段正确。
+- 工作负载支持 `fanout` / `sub_rounds`,新增 `examples/workloads/w5-fanout.toml`。
+- `scripts/push.ps1`:本机沙箱下的推送脚本(openssl 后端 + 令牌头,不落盘)。
+
 ### 计划中
 
 - K3:把 `kv_waste` 接入调度目标并做消融
-- K5:定位 2 GiB 下偶发 p99 异常
 - K6:B4 最优性间隙全量(E5)
-- K7:子 Agent 扇出实验(`SHARE` / `ISOLATE`)
+- K8:`ISOLATE` 子 Agent 模式的实验
 - M5:`VLLMBackend` / `OpenAICompatBackend`(需真实 GPU 产出 L3)
 
 ## [0.1.0] — 2026-11-07
