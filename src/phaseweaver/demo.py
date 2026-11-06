@@ -114,11 +114,11 @@ async def run_one(
     ]
 
     async def agent(handle: Any) -> None:
+        prompt = workload.context_tokens
         for spec in tools:
-            await handle.reason(
-                prompt_tokens=workload.context_tokens, out_tokens=workload.out_tokens
-            )
+            await handle.reason(prompt_tokens=prompt, out_tokens=workload.out_tokens)
             await handle.call_tool(spec, {"code": "pass"})
+            prompt += workload.out_tokens  # a conversation grows every round
 
     pending: list[asyncio.Task[Any]] = []
     for i in range(workload.agents):
@@ -135,7 +135,7 @@ async def run_one(
 
 HEADER = (
     f"{'policy':<7}{'done':>6}{'slo':>8}{'goodput':>9}{'p50':>9}"
-    f"{'p95':>9}{'p99':>9}{'thrash':>8}{'recomp':>9}"
+    f"{'p95':>9}{'p99':>9}{'thrash':>8}{'recomp':>9}{'kv_waste':>10}"
 )
 
 
@@ -143,7 +143,7 @@ def print_row(policy: str, row: dict[str, float]) -> None:
     print(
         f"{policy:<7}{int(row['completed']):>6}{row['slo_rate']:>8.3f}{row['goodput']:>9.3f}"
         f"{row['p50_ms']:>9.0f}{row['p95_ms']:>9.0f}{row['p99_ms']:>9.0f}"
-        f"{row['thrash']:>8.2f}{int(row['recompute_tok']):>9}"
+        f"{row['thrash']:>8.2f}{int(row['recompute_tok']):>9}{row['kv_waste_mib_s']:>10.0f}"
     )
 
 

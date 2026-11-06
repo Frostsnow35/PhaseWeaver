@@ -21,6 +21,11 @@ class BackendCaps:
     supports_drop: bool = True
     supports_offload: bool = False
     supports_engine_sleep: bool = False
+    #: batching efficiency: per-stream rate = base / (1 + alpha*(n-1)).
+    #: 0.0 means "no compute contention" (each stream is alone).
+    contention_alpha: float = 0.15
+    #: integration step of the shared-throughput simulation, in virtual seconds
+    time_slice_s: float = 0.05
 
     @property
     def blocks_total(self) -> int:

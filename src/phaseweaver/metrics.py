@@ -36,6 +36,10 @@ class RunReport:
     recompute_tokens: int = 0
     peak_resident_bytes: int = 0
     gpu_idle_wasted_bytes_s: float = 0.0
+    #: F4: bytes x seconds where a context occupies memory while its owner is
+    #: NOT reasoning. This is the "pinned while idle" waste, and unlike
+    #: gpu_idle_wasted_bytes_s it is non-zero whenever anyone yields badly.
+    kv_occupancy_waste_bytes_s: float = 0.0
     admission_rejects: int = 0
     restore_latencies_ms: list[float] = field(default_factory=list)
     queue_waits_ms: list[float] = field(default_factory=list)
@@ -89,6 +93,7 @@ class RunReport:
             "recompute_tok": float(self.recompute_tokens),
             "peak_kv_mib": round(self.peak_resident_bytes / 1024 / 1024, 1),
             "idle_waste_mib_s": round(self.gpu_idle_wasted_bytes_s / 1024 / 1024, 1),
+            "kv_waste_mib_s": round(self.kv_occupancy_waste_bytes_s / 1024 / 1024, 1),
         }
 
 
@@ -101,6 +106,7 @@ class MetricsReducer:
         reasoning_units: set[str] = set()
         last_ts = 0.0
         idle_accum = 0.0
+        waste_accum = 0.0
 
         def resident_total() -> int:
             return sum(resident.values())
@@ -109,6 +115,9 @@ class MetricsReducer:
             dt = max(0.0, ev.ts - last_ts)
             if not reasoning_units:
                 idle_accum += dt * resident_total()
+            for uid, size in resident.items():
+                if uid not in reasoning_units and size > 0:
+                    waste_accum += dt * size
             last_ts = ev.ts
 
             if ev.event == "unit_created":
@@ -153,4 +162,5 @@ class MetricsReducer:
 
         report.wall_clock_s = last_ts
         report.gpu_idle_wasted_bytes_s = idle_accum
+        report.kv_occupancy_waste_bytes_s = waste_accum
         return report

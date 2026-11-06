@@ -1,0 +1,19 @@
+[workload]
+name = "w3"
+# 队列场景:容量只够约 8~9 个上下文,用于压测准入与排队。
+# 注意:当前存在 K1(虚拟时钟 + 容量等待)缺陷,12 Agent 的 B0 跑不出结果。
+agents = 12
+rounds = 4
+context_tokens = 8192
+out_tokens = 128
+slo_s = 120.0
+seed = 7
+
+[tool]
+kind = "python"
+p50_s = 2.0
+sigma = 0.6
+
+[arrival]
+kind = "poisson"
+rate_per_s = 0.5

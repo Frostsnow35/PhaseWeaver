@@ -5,6 +5,7 @@ The broker only decides and accounts; it never touches the engine.
 
 from __future__ import annotations
 
+import asyncio
 import itertools
 from dataclasses import dataclass
 
@@ -42,6 +43,9 @@ class LeaseBroker:
         self._budget = budget
         self._leases: dict[LeaseId, Lease] = {}
         self._seq = itertools.count(1)
+        #: set whenever capacity is returned; waiters await this instead of
+        #: polling the clock (polling defeats the virtual clock's idle jump).
+        self._capacity_event = asyncio.Event()
 
     @property
     def budget(self) -> Budget:
@@ -100,11 +104,40 @@ class LeaseBroker:
         )
         return lease
 
+    def resize(self, lease_id: LeaseId, new_amount: int) -> bool:
+        """Atomically change a lease's amount.
+
+        Never release-then-acquire: the gap would free budget while the engine
+        still holds the blocks, so the engine could over-allocate (F1).
+        """
+        lease = self._leases.get(lease_id)
+        if lease is None or not lease.active:
+            return False
+        delta = new_amount - lease.amount
+        if delta > 0 and delta > self.available(lease.kind):
+            return False
+        old = lease.amount
+        lease.amount = new_amount
+        self._journal.append(
+            "lease_granted",
+            unit_id=lease.unit_id,
+            payload={
+                "lease_id": lease.lease_id,
+                "kind": lease.kind.value,
+                "amount": new_amount,
+                "delta": delta,
+                "context_id": lease.context_id,
+                "resize_from": old,
+            },
+        )
+        return True
+
     def release(self, lease_id: LeaseId, reason: str = "released") -> None:
         lease = self._leases.get(lease_id)
         if lease is None or not lease.active:
             return
         lease.active = False
+        self._capacity_event.set()
         self._journal.append(
             "lease_released",
             unit_id=lease.unit_id,
@@ -128,3 +161,11 @@ class LeaseBroker:
         for lease in self.active_leases():
             self.release(lease.lease_id, reason=reason)
         self._journal.append("forced_release", payload={"reason": reason})
+
+    async def wait_for_capacity(self, timeout_s: float = 120.0) -> None:
+        """Block until some capacity is returned (event-driven, no polling)."""
+        self._capacity_event.clear()
+        try:
+            await asyncio.wait_for(self._capacity_event.wait(), timeout=timeout_s)
+        except TimeoutError:
+            return

@@ -1,6 +1,6 @@
 [workload]
 name = "w1"
-agents = 12
+agents = 8
 rounds = 4
 context_tokens = 8192
 out_tokens = 128

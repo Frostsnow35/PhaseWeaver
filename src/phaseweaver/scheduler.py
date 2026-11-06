@@ -50,10 +50,12 @@ class SystemScheduler:
         return snap.pressure < 0.98
 
     def allow_restore(self, unit_id: str, snap: ClusterSnapshot) -> bool:
-        st = self._state(unit_id)
-        if snap.pressure >= 0.98:
-            return False
-        return not (snap.now - st.last_park_ts < self.config.park_cooldown_s)
+        """Only capacity can refuse a restore; the park cooldown must not.
+
+        Conflating the two starved waiters in E1 (3 tasks failed). Cooldown is a
+        *parking* brake, not a *restoring* brake (F3).
+        """
+        return snap.pressure < 0.98
 
     def disposition_for(
         self, unit_id: str, snap: ClusterSnapshot, expected_tool_s: float
@@ -100,6 +102,10 @@ class SystemScheduler:
     def record_restore(self, unit_id: str, now: float) -> None:
         st = self._state(unit_id)
         st.last_restore_ts = now
+
+    def note_activated(self, unit_id: str, now: float) -> None:
+        st = self._state(unit_id)
+        st.resident_since = now
 
     def tick(self, now: float) -> None:
         """Advance one slot: slide the thrash window and accrue DRR deficit."""

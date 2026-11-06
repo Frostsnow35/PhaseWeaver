@@ -12,8 +12,9 @@ PhaseWeaver 位于 Agent 编排框架与 LLM 推理引擎之间,把 Agent、Suba
 
 - M0–M3 完成:执行单元树、双状态机、租约/处置、全局 SLO 调度、mock 仿真、E1 CLI。
 - 测试:`50 passed`(unit / property / integration),`mypy --strict` 与 `ruff` 通过。
-- 实验:E1 已跑通,但**核心主张尚未成立**,原因与修复计划见 [docs/notes/experiments.md](docs/notes/experiments.md)。
-- 下一步:F1 租约 block 化 → F2 mock 算力竞争 → F3 背压重设计 → F4 主指标修正 → F5 全量重跑。
+- 实验:E1 已跑通并完成 F1–F4 修正。[L1] 结论:让出策略把"显存闲置占用"降低 2–3.4 倍、抖动降低一半,但**在容量匹配负载下没有吞吐收益**;过载场景被 K1 阻塞。
+- 下一步:K1 修虚拟时钟/容量等待 → K2 过载重跑 → K3 把 `kv_waste` 接入调度目标。
+- 详见 [docs/notes/experiments.md](docs/notes/experiments.md)。
 
 ## 本机环境注意事项(sandbox)
 

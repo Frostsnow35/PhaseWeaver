@@ -171,20 +171,22 @@ class Runtime:
             ctx = InferenceContext(context_id=f"ctx-{unit.unit_id.replace('/', '_')}")
             unit.context = ctx
         if ctx.state is not ContextState.ACTIVE:
-            await self._activate(unit, ctx, prompt_tokens)
+            await self._activate(unit, ctx, prompt_tokens, prompt_tokens + out_tokens)
         handle = self._handles[unit.unit_id]
-        stats = await self.backend.complete(handle, out_tokens)
-        tokens = prompt_tokens + out_tokens
+        # A growing conversation: the engine keeps every token it has seen, so the
+        # reservation must cover the union of caller-supplied prompt and history.
+        tokens = max(prompt_tokens, ctx.resident_tokens) + out_tokens
         await self._sync_lease(unit, ctx, self._lease_bytes(tokens))
+        stats = await self.backend.complete(handle, out_tokens)
         self._set_context(unit, ctx, ContextState.ACTIVE, tokens)
         return stats
 
     async def _activate(
-        self, unit: ExecutionUnit, ctx: InferenceContext, prompt_tokens: int
+        self, unit: ExecutionUnit, ctx: InferenceContext, prompt_tokens: int, reserve_tokens: int
     ) -> None:
         handle = self._handles.get(unit.unit_id)
         restored = None
-        want = self._lease_bytes(prompt_tokens)
+        want = self._lease_bytes(reserve_tokens)
         unit.busy = True
         try:
             # Lease first: the engine allocation must never outrun the budget.
@@ -242,6 +244,10 @@ class Runtime:
                 "resident_tokens": ctx.resident_tokens,
             },
         )
+        if state is ContextState.ACTIVE:
+            notifier = getattr(self.policy, "note_activated", None)
+            if notifier is not None:
+                notifier(unit.unit_id, self.clock.now())
 
     # --- tools -------------------------------------------------------------
     async def call_tool(
@@ -360,24 +366,33 @@ class Runtime:
         current = self._leases.get(unit.unit_id)
         if current is not None and current.active and current.amount == want:
             return
-        # Release first: acquiring a bigger lease while still holding the old one
-        # deadlocks under pressure (classic resize leak).
-        if current is not None:
-            self.broker.release(current.lease_id, reason="resize")
-            self._leases.pop(unit.unit_id, None)
         deadline = self.clock.now() + wait_s
         while True:
-            lease = self.broker.acquire(
-                unit.unit_id, ctx.context_id, LeaseKind.KV_BYTES, want, unit.priority
-            )
-            if lease is not None:
-                self._leases[unit.unit_id] = lease
-                return
+            if current is None:
+                lease = self.broker.acquire(
+                    unit.unit_id, ctx.context_id, LeaseKind.KV_BYTES, want, unit.priority
+                )
+                if lease is not None:
+                    self._leases[unit.unit_id] = lease
+                    return
+            else:
+                # Atomic resize: the lease never disappears, so engine blocks and
+                # leased bytes stay in lockstep (F1).
+                if self.broker.resize(current.lease_id, want):
+                    return
             if self.clock.now() >= deadline:
                 raise AdmissionRejected(f"kv budget exhausted for {unit.unit_id}")
-            await self.clock.wait(0.05)
+            # Event-driven first (no clock polling, which would stop the virtual
+            # clock from jumping); the short real-time cap only re-checks the
+            # virtual deadline when nothing is released.
+            await self.broker.wait_for_capacity(timeout_s=0.05)
 
     async def _release_unit(self, unit: ExecutionUnit) -> None:
+        # Free the engine allocation too: releasing only the lease leaks blocks
+        # and the engine fills up while the budget looks empty.
+        handle = self._handles.pop(unit.unit_id, None)
+        if handle is not None:
+            await self.backend.abort(handle, "unit_end")
         self._leases.pop(unit.unit_id, None)
         for lease in self.broker.active_leases():
             if lease.unit_id == unit.unit_id:
