@@ -1,0 +1,10 @@
+# 让 Git 归一化行尾,避免 Windows/CI 之间的无意义 diff。
+* text=auto eol=lf
+
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+*.png binary
+*.jpg binary
+*.gif binary

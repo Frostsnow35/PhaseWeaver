@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 设计问题 / 讨论
+    url: https://github.com/Frostsnow35/PhaseWeaver/discussions
+    about: 不确定是不是 bug,或想讨论设计取舍时用这里

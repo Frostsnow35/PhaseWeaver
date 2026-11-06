@@ -6,8 +6,22 @@ build-backend = "hatchling.build"
 name = "phaseweaver"
 version = "0.1.0"
 description = "Phase-aware agent runtime for GPU resource coordination"
+readme = "README.md"
 requires-python = ">=3.11"
+license = { text = "MIT" }
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Distributed Computing",
+]
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/Frostsnow35/PhaseWeaver"
+Issues = "https://github.com/Frostsnow35/PhaseWeaver/issues"
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "hypothesis>=6", "ruff>=0.6", "mypy>=1.11"]

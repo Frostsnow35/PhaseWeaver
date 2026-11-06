@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / py${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install ${{ matrix.python }}
+
+      - name: Install dependencies
+        run: uv sync --extra dev --python ${{ matrix.python }}
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Type check
+        run: uv run mypy src/phaseweaver
+
+      - name: Test
+        run: uv run pytest -q
+
+      - name: Smoke — run the experiment CLI
+        run: uv run python -m phaseweaver.demo compare --workload examples/workloads/w1.toml --capacity-gib 4 --policies B0,B2
