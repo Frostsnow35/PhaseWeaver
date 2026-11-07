@@ -1,0 +1,22 @@
+[workload]
+name = "w9-fanout"
+# 扇出 3 个子 Agent;inherit_mode 由实验脚本切换(none / copy / handoff)。
+agents = 6
+rounds = 2
+context_tokens = 4096
+out_tokens = 128
+slo_s = 240.0
+seed = 3
+fanout = 3
+sub_rounds = 2
+sub_context_tokens = 2048
+inherit_mode = "none"
+
+[tool]
+kind = "python"
+p50_s = 3.0
+sigma = 0.5
+
+[arrival]
+kind = "poisson"
+rate_per_s = 0.35

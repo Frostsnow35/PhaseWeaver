@@ -31,7 +31,7 @@ async def child(handle: AgentHandle) -> None:
 
 async def parent(handle: AgentHandle) -> None:
     await handle.reason(prompt_tokens=256, out_tokens=16)
-    await handle.fork("delegate", child, inherit_prefix=True)
+    await handle.fork("delegate", child, inherit="handoff")
     await handle.reason(prompt_tokens=320, out_tokens=16)
 
 
@@ -59,7 +59,9 @@ def run(inherit: bool) -> Runtime:
 def _wrap(inherit: bool):  # type: ignore[no-untyped-def]
     async def agent(handle: AgentHandle) -> None:
         await handle.reason(prompt_tokens=256, out_tokens=16)
-        await handle.fork("delegate", child, inherit_prefix=inherit)
+        await handle.fork(
+            "delegate", child, inherit="handoff" if inherit else "none"
+        )
         await handle.reason(prompt_tokens=320, out_tokens=16)
 
     return agent

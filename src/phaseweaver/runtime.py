@@ -75,9 +75,9 @@ class AgentHandle:
         fn: AgentFn,
         *,
         mode: ForkMode = ForkMode.SHARE,
-        inherit_prefix: bool = False,
+        inherit: str = "none",
     ) -> TaskOutcome:
-        return await self._rt.fork(self.unit, label, fn, mode=mode, inherit_prefix=inherit_prefix)
+        return await self._rt.fork(self.unit, label, fn, mode=mode, inherit_mode=inherit)
 
 
 class Runtime:
@@ -502,8 +502,11 @@ class Runtime:
             if not unit.phase.is_terminal():
                 self.registry.transition(unit.unit_id, Phase.CANCELLED, reason="parent_released")
             self._leases.pop(unit.unit_id, None)
+            ctx_id = unit.context.context_id if unit.context is not None else None
             for lease in self.broker.active_leases():
-                if lease.unit_id == unit.unit_id:
+                if lease.unit_id == unit.unit_id or (
+                    ctx_id is not None and lease.context_id == ctx_id
+                ):
                     self.broker.release(lease.lease_id, reason="unit_end")
             if unit.context is not None and unit.context.state is not ContextState.RELEASED:
                 self._set_context(unit, unit.context, ContextState.RELEASED)
@@ -526,7 +529,7 @@ class Runtime:
         fn: AgentFn,
         *,
         mode: ForkMode = ForkMode.SHARE,
-        inherit_prefix: bool = False,
+        inherit_mode: str = "none",
     ) -> TaskOutcome:
         """Run a child to completion while the parent waits.
 
@@ -555,16 +558,21 @@ class Runtime:
         # both try to park the same parent context.
         self._fork_depth[parent_id] = depth + 1
         child = self.registry.fork(parent_id, label, mode=mode, scope=scope_id)
-        # KV handoff: the parent transfers ownership of its resident blocks to the
-        # child instead of copying them (or dropping and recomputing). Only the
-        # first child of a fork group can inherit - one context, one owner.
+        # KV inheritance. Two honest options:
+        #   none    - the child re-prefills the parent's context (baseline)
+        #   handoff - single-owner transfer: zero copy, zero recompute, but only
+        #             the first child of a fork group can own it
+        # (A "copy" mode was prototyped and dropped: duplicating the prefix doubles
+        # residency and simply moves the failure to admission control.)
         parent_ctx = parent.context
-        if (
-            inherit_prefix
-            and depth == 0
+        can_inherit = (
+            inherit_mode == "handoff"
             and parent_ctx is not None
+            and parent_ctx.resident_tokens > 0
             and parent_ctx.state in (ContextState.ACTIVE, ContextState.RETAINED)
-        ):
+        )
+        if can_inherit and depth == 0:
+            assert parent_ctx is not None  # narrowed by can_inherit
             parent_handle = self._handles.get(parent_id)
             if parent_handle is not None:
                 child_ctx_id = f"ctx-{child.unit_id.replace('/', '_')}"
@@ -625,7 +633,8 @@ class Runtime:
                 # the child's context with zero recompute.
                 child_handle = self._handles.get(child.unit_id)
                 if (
-                    child.adopted_from is not None
+                    inherit_mode == "handoff"
+                    and child.adopted_from is not None
                     and child_handle is not None
                     and parent_ctx is not None
                     and parent_ctx.state is ContextState.HANDED_OFF

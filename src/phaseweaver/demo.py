@@ -45,7 +45,8 @@ class Workload:
     fork_mode: str = "share"
     sub_context_tokens: int = 0
     greedy_factor: float = 1.0
-    inherit_prefix: bool = False
+    #: none | handoff | copy  (inherit_prefix kept as a legacy boolean alias)
+    inherit_mode: str = "none"
 
     @classmethod
     def load(cls, path: Path) -> Workload:
@@ -67,7 +68,10 @@ class Workload:
             fork_mode=str(w.get("fork_mode", "share")),
             sub_context_tokens=int(w.get("sub_context_tokens", 0)),
             greedy_factor=float(w.get("greedy_factor", 1.0)),
-            inherit_prefix=bool(w.get("inherit_prefix", False)),
+            inherit_mode=str(
+                w.get("inherit_mode")
+                or ("handoff" if w.get("inherit_prefix") in (True, "true") else "none")
+            ),
         )
 
 
@@ -158,7 +162,7 @@ async def run_one(
                         f"sub-{i}",
                         lambda h, g=(i == 0): child(h, g),
                         mode=mode,
-                        inherit_prefix=workload.inherit_prefix,
+                        inherit=workload.inherit_mode,
                     )
                     for i in range(workload.fanout)
                 )
