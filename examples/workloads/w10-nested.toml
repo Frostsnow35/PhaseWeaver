@@ -1,0 +1,23 @@
+[workload]
+name = "w10-nested"
+# 两层委托:父 -> 子 -> 孙。用于验证交接在嵌套树上依然成立。
+agents = 6
+rounds = 2
+context_tokens = 4096
+out_tokens = 128
+slo_s = 240.0
+seed = 5
+fanout = 1
+sub_rounds = 2
+sub_context_tokens = 2048
+nested_depth = 2
+inherit_mode = "handoff"
+
+[tool]
+kind = "python"
+p50_s = 3.0
+sigma = 0.5
+
+[arrival]
+kind = "poisson"
+rate_per_s = 0.35

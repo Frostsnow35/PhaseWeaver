@@ -45,8 +45,10 @@ class Workload:
     fork_mode: str = "share"
     sub_context_tokens: int = 0
     greedy_factor: float = 1.0
-    #: none | handoff | copy  (inherit_prefix kept as a legacy boolean alias)
+    #: none | handoff | relay  (inherit_prefix kept as a legacy boolean alias)
     inherit_mode: str = "none"
+    #: 2 means each subagent also delegates to a grandchild
+    nested_depth: int = 1
 
     @classmethod
     def load(cls, path: Path) -> Workload:
@@ -72,6 +74,7 @@ class Workload:
                 w.get("inherit_mode")
                 or ("handoff" if w.get("inherit_prefix") in (True, "true") else "none")
             ),
+            nested_depth=int(w.get("nested_depth", 1)),
         )
 
 
@@ -145,6 +148,15 @@ async def run_one(
                 {"code": "pass"},
             )
             prompt += workload.out_tokens
+        if workload.nested_depth >= 2:
+            await handle.fork(
+                "grandchild", _grandchild, inherit=workload.inherit_mode
+            )
+
+    async def _grandchild(handle: Any) -> None:
+        await handle.reason(
+            prompt_tokens=workload.context_tokens // 2, out_tokens=workload.out_tokens
+        )
 
     async def agent(handle: Any) -> None:
         prompt = workload.context_tokens
