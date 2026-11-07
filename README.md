@@ -1,47 +1,100 @@
 # PhaseWeaver
 
-面向 Agent 执行生命周期与 GPU 推理资源协同的智能运行时。
+**Agent 执行运行时**:让 Agent 在"推理 ↔ 工具 ↔ 等待"之间的阶段切换,变成可编程的 GPU 资源决策。
 
-PhaseWeaver 位于 Agent 编排框架与 LLM 推理引擎之间,把 Agent、Subagent 与工具调用统一抽象为可管理的执行单元,在 Agent 于「模型推理 / 工具执行 / 等待」之间切换时,通过**资源租约**与**处置策略**协调推理侧 KV Cache 的保留、释放、卸载与恢复。
+[![CI](https://github.com/Frostsnow35/PhaseWeaver/actions/workflows/ci.yml/badge.svg)](https://github.com/Frostsnow35/PhaseWeaver/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue)](pyproject.toml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-- 设计规格:[docs/specs/2026-11-07-phaseweaver-design.md](docs/specs/2026-11-07-phaseweaver-design.md)
-- 关键取舍(ADR):[docs/adr/](docs/adr/)
-- 相关工作与能力矩阵:[docs/notes/related-work.md](docs/notes/related-work.md)
+## 它解决什么
 
-## 当前状态
+一个 Agent 任务通常是「推理 3 秒 → 跑工具 30 秒 → 再推理」。工具阶段 GPU 空转,但该 Agent 的
+KV Cache 仍占着显存,其他 Agent 只能排队。PhaseWeaver 把这个切换点变成主动决策:
+**保留 / 卸载 / 丢弃 / 释放**,并把代价写进账里;子 Agent 之间还能**移交 KV 所有权**。
 
-- M0–M3 完成:执行单元树、双状态机、租约/处置、全局 SLO 调度、mock 仿真、E1 CLI。
-- 测试:`50 passed`(unit / property / integration),`mypy --strict` 与 `ruff` 通过。
-- 实验(v8 重跑,工具时长真实计入仿真):2/4 GiB 下 B2 相对 B0 的 SLO 0.972→**1.000**、p99 115.8→**108.7 s**、kv_waste **−48%**;4 GiB 下 goodput **+8.7%**、p99 **−10.6%**;8 GiB 无压力时自动退化为不让出,开销为 0。子 Agent 扇出 p99 **−23.7%**,贪婪子场景 goodput **+27.9%**。
-- 下一步:K6 修正 B4 下界 → K10 队列反馈成本模型 → M5 真实引擎适配。
-- 详见 [docs/notes/experiments.md](docs/notes/experiments.md)。
+> 它不是编排框架。契约只有一条:推理与工具调用经过 `unit.reason()` / `unit.call_tool()`,
+> 让运行时看见阶段切换。详见 [它是什么](docs/guide/what-is-it.md)。
+
+## 五分钟开始
+
+```python
+import asyncio
+from phaseweaver import PhaseWeaver, ToolSpec
+
+async def agent(unit):
+    await unit.reason(prompt_tokens=2048, out_tokens=128)
+    await unit.call_tool(ToolSpec("pytest", "python", expected_duration_s=4.0),
+                         {"code": "print('ok')"})
+    await unit.reason(prompt_tokens=2176, out_tokens=128)
+
+async def main():
+    async with PhaseWeaver(profile="coding", capacity_gib=2.0) as pw:
+        await pw.run("fix-bug", agent)
+        print(pw.summary())
+
+asyncio.run(main())
+```
+
+无需 GPU:默认使用确定性仿真后端(虚拟时钟 + 块级 KV 记账),同 seed 结果可复现。
+
+- [快速开始](docs/guide/quickstart.md) · [扩展指南](docs/guide/extending.md) · [设计规格](docs/specs/2026-11-07-phaseweaver-design.md)
+
+## 场景档案
+
+| profile | 适用 | 默认策略 | 默认 KV 继承 |
+|---|---|---|---|
+| `coding` | 编码 Agent,短工具、长会话 | auto(压力自适应) | 不继承 |
+| `research` | 浏览/检索,长工具 | B2(全局 SLO) | 不继承 |
+| `orchestrator` | 多 Agent 扇出/汇合 | B2 | handoff |
+| `delegation` | 链式委托(父→子→孙) | B2 | handoff |
+
+一条命令跑完整场景矩阵:
+
+```bash
+python -m phaseweaver.demo scenarios --capacity-gib 2 --seeds 3
+```
+
+## 核心机制
+
+- **双状态机**:`Phase`(执行阶段)与 `ContextState`(KV 归属)正交,7 条不变量可断言。
+- **处置权租约**:`RETAIN / OFFLOAD / DROP / RELEASE` + 引擎能力协商 + 显式降级。
+- **KV 交接**:fork 时把 KV 所有权交给子单元,join 交回——零拷贝、零重算。
+- **可证下界**:按占空比推导的 makespan 下界,用来判断调度器离结构上限有多远。
+- **事件日志即事实**:所有指标由日志重放,不维护并行计数器。
 
 ## 接入真实引擎
-
-引擎无关不是口号,而是可执行的适配器层:
 
 ```python
 from phaseweaver.backends.vllm import VLLMBackend
 from phaseweaver.backends.openai_compat import OpenAICompatConfig
-from phaseweaver.clock import RealClock
-from phaseweaver.runtime import Runtime, RuntimeConfig
 
 backend = VLLMBackend(OpenAICompatConfig(base_url="http://127.0.0.1:8000", model="qwen2.5-7b"))
-runtime = Runtime(
-    backend=backend,
-    clock=RealClock(),                  # 真实时钟
-    budget=Budget(total_bytes=backend.caps().capacity_bytes),
-    policy=SystemScheduler(SchedulerConfig()),
-    config=RuntimeConfig(simulate_tools=False),   # 真实执行工具
-)
+async with PhaseWeaver(backend=backend, profile="research") as pw:
+    await pw.run("task", agent)
 ```
 
-能力协商是显式的:OpenAI 兼容接口没有"按请求卸载 KV",所以 `OFFLOAD` 会**自动降级为
-`DROP`**(重算),事件里记录 `degraded_from="offload"`。vLLM 的 `/sleep` `/wake_up` 是
-引擎级副作用,必须显式 `allow_engine_sleep=True` 才可用。
+引擎不支持的能力会自动降级(如无 KV connector 时 `OFFLOAD → DROP`),事件里记录 `degraded_from`。
+适配器协议见 [扩展指南](docs/guide/extending.md)。
 
-`tests/integration/test_openai_backend.py` 用一个本地假 OpenAI 服务验证了整条链路
-(无需 GPU):HTTP 调用、能力降级、重算记账、Runtime 原样运行。
+## 开发
+
+```bash
+uv sync --extra dev
+uv run pytest -q
+uv run ruff check .
+uv run mypy src/phaseweaver
+# 跨平台类型检查(CI 在两个 OS 上各跑一次)
+uv run mypy --platform linux src/phaseweaver
+```
+
+工程约定见 [CONTRIBUTING.md](CONTRIBUTING.md),取舍记录见 [docs/adr/](docs/adr/),
+开发历史与教训见 [docs/notes/devlog.md](docs/notes/devlog.md)。
+
+## 状态与边界
+
+- 核心机制与实验均在 mock 仿真上完成([L1]/[L2]),**尚未在真实 GPU 上验证**([L3],issue #3)。
+- 本仓库的仿真数字不得表述为真实引擎性能。
+- 实验记录:[docs/notes/experiments.md](docs/notes/experiments.md)
 
 ## 本机环境注意事项(sandbox)
 
@@ -51,18 +104,6 @@ runtime = Runtime(
 4. `taskkill` 在当前 token 下被拒绝,进程树回收改用 **Windows Job Object**。
 5. `tempfile.mkdtemp`(mode 0700)创建的目录不可写,私有临时目录用默认权限自建。
 6. `git push` 直接跑会失败(凭证管理器与 schannel 都被挡):用 `pwsh scripts/push.ps1`。
-
-## 快速开始
-
-```bash
-uv sync
-uv run pytest -q
-uv run python -m phaseweaver.demo compare --workload w1
-```
-
-## 数字可信度
-
-本项目所有对比数据都标注可信度等级:**L1 机制证明**(mock 仿真)、**L2 参数敏感性**、**L3 真实测量**(真实 GPU + vLLM)。第一阶段只产出 L1/L2,不得表述为 L3。见规格 §12.4。
 
 ## 许可证
 

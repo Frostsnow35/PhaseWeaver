@@ -41,6 +41,8 @@ class RuntimeConfig:
     isolate_quota_bytes: int = 512 * 1024**2
     #: K11: when a quota cannot hold the whole context, compact instead of failing.
     compact_on_quota: bool = True
+    #: Default KV inheritance for forks when the caller does not specify one.
+    default_inherit_mode: str = "none"
     #: Simulate tools against the virtual clock instead of spawning subprocesses.
     #: Deterministic and faithful to the declared tool latency; set False only when
     #: running against a real engine.
@@ -75,7 +77,7 @@ class AgentHandle:
         fn: AgentFn,
         *,
         mode: ForkMode = ForkMode.SHARE,
-        inherit: str = "none",
+        inherit: str | None = None,
     ) -> TaskOutcome:
         return await self._rt.fork(self.unit, label, fn, mode=mode, inherit_mode=inherit)
 
@@ -530,7 +532,7 @@ class Runtime:
         fn: AgentFn,
         *,
         mode: ForkMode = ForkMode.SHARE,
-        inherit_mode: str = "none",
+        inherit_mode: str | None = None,
     ) -> TaskOutcome:
         """Run a child to completion while the parent waits.
 
@@ -567,6 +569,7 @@ class Runtime:
         # residency and simply moves the failure to admission control.)
         # Relay (K12c): each child in turn takes the KV from its predecessor via the
         # parent, so every delegated task starts warm instead of only the first.
+        inherit_mode = inherit_mode or self.config.default_inherit_mode
         relay = inherit_mode == "relay"
         can_inherit_mode = inherit_mode in ("handoff", "relay")
         parent_ctx = parent.context

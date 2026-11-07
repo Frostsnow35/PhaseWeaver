@@ -29,6 +29,34 @@ Windows 本机有 5 条 sandbox 约束(管道/`taskkill`/`mkdtemp` 等),先读 [
 - **数字分级**:[L1] mock 机制证明、[L2] 参数敏感性、[L3] 真实 GPU。禁止把 L1/L2 写成 L3,
   禁止只报均值不报 p99 与重算成本。
 
+## 扩展点
+
+四个协议构成对外扩展面,实现它们不需要改运行时内核:
+
+| 想做什么 | 实现 | 参考 |
+|---|---|---|
+| 接一个新推理引擎 | `InferenceBackend` | `backends/mock.py`、`backends/openai_compat.py` |
+| 换一种资源策略 | `Scheduler` | `policy.py`、`scheduler.py`、`autopilot.py` |
+| 加一种工具 | `ToolExecutor` | `tools/proc.py` |
+| 定义一个新场景 | `Profile` | `profile.py` |
+
+完整步骤与约束见 [扩展指南](docs/guide/extending.md)。新增场景必须附一个可复现工作负载与
+一组实验数字,否则视为未完成。
+
+## API 稳定性
+
+- 公开面是 `phaseweaver/__init__.py` 的 `__all__`;`tests/unit/test_app.py` 会守住它。
+- 删除或重命名 `__all__` 中的符号属于 **breaking change**,需要 major 版本 + CHANGELOG 记录。
+- `phaseweaver.backends.*`、`phaseweaver.tools.*` 视为半公开:可以扩展,但不保证跨 minor 版本
+  的构造函数兼容。
+- 内部模块(`runtime` 之外的私有方法、`_` 前缀)随时可变。
+
+## 发布流程
+
+1. 更新 `CHANGELOG.md` 的 `[Unreleased]` 段。
+2. 语义化版本:新增能力 → minor;修复 → patch;破坏 API/语义 → major。
+3. 打 tag 前必须:`pytest` / `ruff` / `mypy`(--platform linux 与 win32)全绿,CI 四格通过。
+
 ## 测试约定
 
 - `tests/unit/`:纯函数与状态机,无 I/O。
