@@ -8,7 +8,7 @@ CI 保证"不坏",这份标准保证**达标**。每一条都必须可执行、�
 
 | # | 闸门 | 判据 | 当前 |
 |---|---|---|---|
-| 1 | 测试 | `pytest` 全绿,0 fail | 98 passed |
+| 1 | 测试 | `pytest` 全绿,0 fail | 96 passed |
 | 2 | 静态检查 | `ruff check .` 无告警 | PASS |
 | 3 | 类型 | `mypy --platform linux|win32 src/phaseweaver` 双平台 0 错 | 40 文件 PASS |
 | 4 | 确定性 | 同 seed 两次运行 `summary_row()` 完全一致 | PASS |

@@ -38,11 +38,13 @@
 - [x] `turns.py`:reason / activate / call_tool
 - 判据:`pytest` 全绿、mypy 双平台通过、同一工作负载数字不变(w1/2GiB B2 = 0.1012)
 
-## R4 可观测性(面向排障)
+## R4 可观测性(已完成)
 
-- 导出 per-unit 相位时间线(Gantt JSON):`unit_id, phase, start, end`
-- 增加 `trace_summary()`:每次 park/restore/handoff 的因果链(基于 `cause_seq`)
-- 判据:给定一次运行,能在不读代码的情况下回答"这个任务为什么慢了"
+- [x] `timeline.py`:per-unit 相位/上下文区间,可导出 JSONL(Gantt 数据)
+- [x] `trace.py`:单测归因(REASONING / ACTING / QUEUED / WAITING)+ 可操作诊断
+- [x] `demo trace` / `demo timeline` 子命令,支持从落盘日志离线分析
+- [x] 交付闸门 `scripts/delivery_check.py`:测试 / lint / 双平台类型 / 确定性 /
+      可观测性 / 性能 六项,当前 **6/6 PASS**
 
 ## R5 扩展生态
 
