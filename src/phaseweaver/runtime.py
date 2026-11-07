@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import traceback
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,7 +12,7 @@ from typing import Any
 from phaseweaver.backends.base import InferenceBackend
 from phaseweaver.cleanup import CleanupMixin
 from phaseweaver.clock import Clock
-from phaseweaver.errors import AdmissionRejected, RuntimeClosed
+from phaseweaver.errors import AdmissionRejected, PhaseWeaverError, RuntimeClosed
 from phaseweaver.handoff import HandoffMixin
 from phaseweaver.invariant import InvariantChecker
 from phaseweaver.journal import EventJournal
@@ -47,6 +48,10 @@ class RuntimeConfig:
     compact_on_quota: bool = True
     #: Default KV inheritance for forks when the caller does not specify one.
     default_inherit_mode: str = "none"
+    #: When true, unexpected exceptions (not PhaseWeaverError) propagate after
+    #: cleanup instead of being reported as a failed task. Turn it on in tests and
+    #: during development; leave it off in production so one agent can't kill the tree.
+    strict_errors: bool = False
     #: Hard ceiling for one backend call. A real engine can stall (driver reset, OOM
     #: retry loop); without this the whole agent tree waits forever.
     backend_timeout_s: float = 300.0
@@ -165,9 +170,21 @@ class Runtime(ParkingMixin, HandoffMixin, CleanupMixin, TurnsMixin):
             await self.cancel(unit, "task_cancelled")
             err = "cancelled"
         except Exception as exc:  # noqa: BLE001
+            unexpected = not isinstance(exc, PhaseWeaverError)
+            if unexpected:
+                self.journal.append(
+                    "run_error",
+                    unit_id=unit.unit_id,
+                    payload={
+                        "error": f"{type(exc).__name__}: {exc}",
+                        "traceback": traceback.format_exc()[-4000:],
+                    },
+                )
             if not unit.phase.is_terminal():
                 self.registry.transition(unit.unit_id, Phase.FAILED, reason=type(exc).__name__)
             err = f"{type(exc).__name__}: {exc}"
+            if unexpected and self.config.strict_errors:
+                raise
         finally:
             await self.release_unit(unit)
         self.checker.check()
@@ -281,7 +298,22 @@ class Runtime(ParkingMixin, HandoffMixin, CleanupMixin, TurnsMixin):
         # Reserve the slot *before* any await: concurrent fork() calls must not
         # both try to park the same parent context.
         self._fork_depth[parent_id] = depth + 1
-        child = self.registry.fork(parent_id, label, mode=mode, scope=scope_id)
+        try:
+            child = self.registry.fork(parent_id, label, mode=mode, scope=scope_id)
+            inherit_mode = inherit_mode or self.config.default_inherit_mode
+            relay = inherit_mode == "relay"
+            can_inherit_mode = inherit_mode in ("handoff", "relay")
+            parent_ctx = parent.context
+            if self._inherits_now(parent_ctx, can_inherit_mode, depth, relay):
+                await self.handoff_to_child(parent, parent_ctx, child)
+        except BaseException:
+            # Anything that raises before the main try/finally below (registry,
+            # inheritance, backend handoff) must not leak the depth slot or the
+            # ISOLATE scope, otherwise every later fork for this parent misbehaves.
+            self._fork_depth[parent_id] = depth
+            if scope_id is not None:
+                self.broker.close_scope(scope_id)
+            raise
         # KV inheritance. Two honest options:
         #   none    - the child re-prefills the parent's context (baseline)
         #   handoff - single-owner transfer: zero copy, zero recompute, but only
@@ -290,30 +322,11 @@ class Runtime(ParkingMixin, HandoffMixin, CleanupMixin, TurnsMixin):
         # residency and simply moves the failure to admission control.)
         # Relay (K12c): each child in turn takes the KV from its predecessor via the
         # parent, so every delegated task starts warm instead of only the first.
-        inherit_mode = inherit_mode or self.config.default_inherit_mode
-        relay = inherit_mode == "relay"
-        can_inherit_mode = inherit_mode in ("handoff", "relay")
         parent_ctx = parent.context
-        can_inherit = (
-            can_inherit_mode
-            and parent_ctx is not None
-            and parent_ctx.resident_tokens > 0
-            and parent_ctx.state in (ContextState.ACTIVE, ContextState.RETAINED)
-        )
-        if can_inherit and (depth == 0 or relay):
-            await self.handoff_to_child(parent, parent_ctx, child)
+        can_inherit_mode = inherit_mode in ("handoff", "relay")
         started = self.clock.now()
         try:
-            if depth == 0:
-                ctx = parent.context
-                if ctx is not None and ctx.state is ContextState.ACTIVE:
-                    expected = self.config.default_expected_tool_s
-                    disposition = self.policy.disposition_for(
-                        parent_id, self.snapshot(), expected
-                    )
-                    await self._park(parent, ctx, disposition)
-                if parent.phase is Phase.REASONING:
-                    self.registry.transition(parent_id, Phase.WAITING)
+            await self._park_parent_for_fork(parent, depth)
             self.registry.transition(child.unit_id, Phase.QUEUED)
             error: str | None = None
             try:
@@ -344,3 +357,29 @@ class Runtime(ParkingMixin, HandoffMixin, CleanupMixin, TurnsMixin):
             phase=child.phase.value,
             latency_ms=(self.clock.now() - started) * 1000,
         )
+
+    @staticmethod
+    def _inherits_now(
+        parent_ctx: InferenceContext | None,
+        can_inherit_mode: bool,
+        depth: int,
+        relay: bool,
+    ) -> bool:
+        """Only a warm context can be inherited, and only by the first child (or relay)."""
+        if not can_inherit_mode or parent_ctx is None or parent_ctx.resident_tokens <= 0:
+            return False
+        if parent_ctx.state not in (ContextState.ACTIVE, ContextState.RETAINED):
+            return False
+        return depth == 0 or relay
+
+    async def _park_parent_for_fork(self, parent: ExecutionUnit, depth: int) -> None:
+        """I1: the parent must not hold an ACTIVE context while it is WAITING."""
+        if depth != 0:
+            return
+        ctx = parent.context
+        if ctx is not None and ctx.state is ContextState.ACTIVE:
+            expected = self.config.default_expected_tool_s
+            disposition = self.policy.disposition_for(parent.unit_id, self.snapshot(), expected)
+            await self._park(parent, ctx, disposition)
+        if parent.phase is Phase.REASONING:
+            self.registry.transition(parent.unit_id, Phase.WAITING)

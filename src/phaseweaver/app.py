@@ -73,7 +73,6 @@ class PhaseWeaver:
 
     def __post_init__(self) -> None:
         self._profile: Profile = resolve(self.profile)
-        self._owns_clock = self.clock is None
         if self.backend is None:
             self._clock: Clock = VirtualClock()
             self._backend: InferenceBackend = MockBackend(

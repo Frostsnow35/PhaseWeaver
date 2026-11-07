@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from statistics import mean, pstdev
+from typing import Any
 
 from phaseweaver.clock import Clock
 from phaseweaver.journal import EventJournal
@@ -134,78 +136,130 @@ class RunReport:
         }
 
 
+class _ReplayState:
+    """Incremental fold over the event log.
+
+    Split out of `MetricsReducer.replay` because one 70-line function with a dozen
+    branches is where metric bugs hide. Each event type now has one small handler
+    and the dispatcher is a dict lookup.
+    """
+
+    def __init__(self, run_id: str) -> None:
+        self.report = RunReport(run_id=run_id)
+        self._arrivals: dict[str, tuple[float, float]] = {}
+        self._resident: dict[str, int] = {}
+        self._reasoning: set[str] = set()
+        self._last_ts = 0.0
+        self._idle = 0.0
+        self._waste = 0.0
+        self._streams = 0
+        self._handlers: dict[str, Callable[[Any], None]] = {
+            "unit_created": self._on_unit_created,
+            "phase_transitioned": self._on_phase,
+            "engine_active": self._on_engine_active,
+            "context_state_changed": self._on_context,
+            "park_completed": self._on_park,
+            "thrash": self._on_event_count("thrash_count"),
+            "admission_rejected": self._on_event_count("admission_rejects"),
+            "restore_completed": self._on_restore,
+        }
+
+    # --- time integration -------------------------------------------------
+    def step(self, event: Any) -> None:
+        dt = max(0.0, event.ts - self._last_ts)
+        if self._reasoning:
+            self.report.gpu_busy_s += dt
+        self.report.concurrency_s += dt * self._streams
+        resident_total = sum(self._resident.values())
+        if not self._reasoning:
+            self._idle += dt * resident_total
+        for unit_id, size in self._resident.items():
+            if unit_id not in self._reasoning and size > 0:
+                self._waste += dt * size
+        self._last_ts = event.ts
+        handler = self._handlers.get(event.event)
+        if handler is not None:
+            handler(event)
+
+    # --- handlers ---------------------------------------------------------
+    def _on_unit_created(self, event: Any) -> None:
+        payload = event.payload
+        if event.unit_id is None:
+            return
+        if payload.get("kind") not in ("agent", "subagent"):
+            return
+        if "arrival_ts" not in payload:
+            return
+        self._arrivals[event.unit_id] = (
+            float(payload["arrival_ts"]),
+            float(payload.get("deadline") or 0.0),
+        )
+
+    def _on_phase(self, event: Any) -> None:
+        if event.unit_id is None:
+            return
+        to = str(event.payload.get("to", ""))
+        if to == "REASONING":
+            self._reasoning.add(event.unit_id)
+        elif to in ("ACTING", "WAITING", "COMPLETED", "FAILED", "CANCELLED"):
+            self._reasoning.discard(event.unit_id)
+        if to in ("COMPLETED", "FAILED", "CANCELLED"):
+            self._finish_task(event, to)
+
+    def _finish_task(self, event: Any, outcome: str) -> None:
+        if event.unit_id not in self._arrivals:
+            return
+        arrived, deadline = self._arrivals.pop(event.unit_id)
+        latency_ms = (event.ts - arrived) * 1000
+        self.report.latencies_ms.append(latency_ms)
+        # deadline is absolute; compare the finish time against it, otherwise a
+        # duration would always appear to meet it.
+        hit = (event.ts <= deadline) if deadline > 0 else True
+        if outcome == "COMPLETED":
+            self.report.completed += 1
+            if hit:
+                self.report.slo_hits += 1
+        elif outcome == "FAILED":
+            self.report.failed += 1
+        else:
+            self.report.cancelled += 1
+
+    def _on_engine_active(self, event: Any) -> None:
+        delta = int(event.payload.get("delta", 0))
+        self._streams = max(0, self._streams + delta)
+
+    def _on_context(self, event: Any) -> None:
+        if event.unit_id is None:
+            return
+        self._resident[event.unit_id] = int(event.payload.get("resident_bytes", 0))
+        self.report.peak_resident_bytes = max(
+            self.report.peak_resident_bytes, sum(self._resident.values())
+        )
+
+    def _on_park(self, event: Any) -> None:
+        self.report.park_count += 1
+
+    def _on_restore(self, event: Any) -> None:
+        self.report.restore_latencies_ms.append(float(event.payload.get("latency_ms", 0.0)))
+        self.report.recompute_tokens += int(event.payload.get("recompute_tokens", 0))
+
+    def _on_event_count(self, attribute: str) -> Callable[[Any], None]:
+        def handler(_event: Any) -> None:
+            setattr(self.report, attribute, getattr(self.report, attribute) + 1)
+
+        return handler
+
+    def finish(self) -> RunReport:
+        self.report.wall_clock_s = self._last_ts
+        self.report.gpu_idle_wasted_bytes_s = self._idle
+        self.report.kv_occupancy_waste_bytes_s = self._waste
+        return self.report
+
+
 class MetricsReducer:
     @staticmethod
     def replay(journal: EventJournal, *, clock: Clock | None = None) -> RunReport:
-        report = RunReport(run_id=journal.run_id)
-        arrivals: dict[str, tuple[float, float]] = {}
-        resident: dict[str, int] = {}
-        reasoning_units: set[str] = set()
-        last_ts = 0.0
-        idle_accum = 0.0
-        waste_accum = 0.0
-        active_streams = 0
-
-        def resident_total() -> int:
-            return sum(resident.values())
-
-        for ev in journal.events():
-            dt = max(0.0, ev.ts - last_ts)
-            if reasoning_units:
-                report.gpu_busy_s += dt
-            report.concurrency_s += dt * active_streams
-            if not reasoning_units:
-                idle_accum += dt * resident_total()
-            for uid, size in resident.items():
-                if uid not in reasoning_units and size > 0:
-                    waste_accum += dt * size
-            last_ts = ev.ts
-
-            if ev.event == "unit_created":
-                payload = ev.payload
-                is_task_unit = payload.get("kind") in ("agent", "subagent")
-                if ev.unit_id and is_task_unit and "arrival_ts" in payload:
-                    arrivals[ev.unit_id] = (
-                        float(payload["arrival_ts"]),
-                        float(payload.get("deadline") or 0.0),
-                    )
-            elif ev.event == "phase_transitioned" and ev.unit_id:
-                to = str(ev.payload.get("to", ""))
-                if to == "REASONING":
-                    reasoning_units.add(ev.unit_id)
-                elif to in ("ACTING", "WAITING", "COMPLETED", "FAILED", "CANCELLED"):
-                    reasoning_units.discard(ev.unit_id)
-                if to in ("COMPLETED", "FAILED", "CANCELLED") and ev.unit_id in arrivals:
-                    arrived, deadline = arrivals.pop(ev.unit_id)
-                    latency_ms = (ev.ts - arrived) * 1000
-                    report.latencies_ms.append(latency_ms)
-                    # deadline is an absolute clock value; compare the finish time
-                    # against it (comparing a duration against it would always pass).
-                    hit = (ev.ts <= deadline) if deadline > 0 else True
-                    if to == "COMPLETED":
-                        report.completed += 1
-                        if hit:
-                            report.slo_hits += 1
-                    elif to == "FAILED":
-                        report.failed += 1
-                    else:
-                        report.cancelled += 1
-            elif ev.event == "engine_active":
-                active_streams = max(0, active_streams + int(ev.payload.get("delta", 0)))
-            elif ev.event == "context_state_changed" and ev.unit_id:
-                resident[ev.unit_id] = int(ev.payload.get("resident_bytes", 0))
-                report.peak_resident_bytes = max(report.peak_resident_bytes, resident_total())
-            elif ev.event == "park_completed":
-                report.park_count += 1
-            elif ev.event == "thrash":
-                report.thrash_count += 1
-            elif ev.event == "admission_rejected":
-                report.admission_rejects += 1
-            elif ev.event == "restore_completed":
-                report.restore_latencies_ms.append(float(ev.payload.get("latency_ms", 0.0)))
-                report.recompute_tokens += int(ev.payload.get("recompute_tokens", 0))
-
-        report.wall_clock_s = last_ts
-        report.gpu_idle_wasted_bytes_s = idle_accum
-        report.kv_occupancy_waste_bytes_s = waste_accum
-        return report
+        state = _ReplayState(journal.run_id)
+        for event in journal.events():
+            state.step(event)
+        return state.finish()

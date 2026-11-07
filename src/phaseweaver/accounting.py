@@ -11,7 +11,7 @@ from collections.abc import MutableMapping
 
 from phaseweaver.backends.base import BackendCaps
 from phaseweaver.leases import LeaseBroker
-from phaseweaver.types import ContextState, Disposition, LeaseKind
+from phaseweaver.types import ContextState, Disposition
 
 #: how many park events inside the window turn into a thrash signal
 THRASH_WINDOW_DEFAULT_S = 60.0
@@ -56,7 +56,3 @@ def record_park(
     recent.append(now)
     history[unit_id] = recent
     return len(recent)
-
-
-def parked_lease_kind() -> LeaseKind:
-    return LeaseKind.KV_BYTES

@@ -32,9 +32,3 @@ class UnitLedger:
         self.handles.clear()
         self.leases.clear()
         self.park_times.clear()
-
-    def owner_of_handle(self, handle: Any) -> UnitId | None:
-        for unit_id, candidate in self.handles.items():
-            if candidate is handle:
-                return unit_id
-        return None

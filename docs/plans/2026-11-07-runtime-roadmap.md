@@ -46,6 +46,15 @@
 - [x] 交付闸门 `scripts/delivery_check.py`:测试 / lint / 双平台类型 / 确定性 /
       可观测性 / 性能 六项,当前 **6/6 PASS**
 
+## R8 审查修复(已完成)
+
+- [x] F1 fork 记账泄漏(高危)+ 回归测试
+- [x] F2 reaper 误判进程死亡(高危)+ 4 个平台路径测试
+- [x] F3/F4 圈复杂度 22/14 → 全部 ≤ 12
+- [x] F5 死代码、F6 CWD 依赖、F7 异常分类
+- [ ] F8 _sync_lease 轮询等待(技术债)
+- [ ] F9 仿真 >12 agents 超线性(技术债)
+
 ## R5 扩展生态
 
 - `[project.entry-points."phaseweaver.backends"]` 等入口点,第三方包可安装

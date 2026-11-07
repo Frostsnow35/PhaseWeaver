@@ -179,6 +179,37 @@ def kill_tree_sync(
         return
 
 
+def _win_process_alive(pid: int) -> bool | None:
+    """True/False from OpenProcess+GetExitCodeProcess, None if it cannot be asked.
+
+    `tasklist` can be denied (restricted tokens, sandboxed desktops); reporting a
+    live process as "gone" would orphan it, so callers must treat None conservatively.
+    """
+    if sys.platform != "win32":  # pragma: no cover - platform branch
+        return None
+    try:
+        kernel32 = _kernel32()
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            error = ctypes.get_last_error()
+            if error == 87:  # ERROR_INVALID_PARAMETER: no such process
+                return False
+            if error == 5:  # ERROR_ACCESS_DENIED: exists but not queryable
+                return True
+            return None
+        try:
+            code = ctypes.c_ulong(0)
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return None
+            return code.value == STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    except OSError:  # pragma: no cover - defensive
+        return None
+
+
 def tree_is_gone(pid: int) -> bool:
     if sys.platform != "win32":
         try:
@@ -186,10 +217,25 @@ def tree_is_gone(pid: int) -> bool:
         except OSError:
             return True
         return False
+    alive = _win_process_alive(pid)
+    if alive is not None:
+        return not alive
+    # Fallback: parse tasklist's CSV instead of substring-matching its table output
+    # (a PID like 19496 would otherwise "match" 1949 or appear in the header).
     out = subprocess.run(
-        ["tasklist", "/FI", f"PID eq {pid}"],
+        ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
         capture_output=True,
         text=True,
         check=False,
     )
-    return str(pid) not in (out.stdout or "")
+    if out.returncode != 0:
+        # Cannot query: assume it is still alive so cleanup does not give up early.
+        return False
+    text = (out.stdout or "").strip()
+    if not text or "INFO:" in text:
+        return True
+    for line in text.splitlines():
+        fields = [field.strip('" ') for field in line.split(",")]
+        if len(fields) > 1 and fields[1] == str(pid):
+            return False
+    return True

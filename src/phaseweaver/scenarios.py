@@ -11,10 +11,21 @@ policy that the project recommends for it.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
-WORKLOADS = Path("examples/workloads")
+
+def workloads_root() -> Path:
+    """Locate the example workloads without assuming the current directory."""
+    override = os.environ.get("PHASEWEAVER_WORKLOADS")
+    if override:
+        return Path(override)
+    local = Path("examples/workloads")
+    if local.is_dir():
+        return local
+    # installed-from-source layout: <repo>/src/phaseweaver/scenarios.py
+    return Path(__file__).resolve().parents[2] / "examples" / "workloads"
 
 
 @dataclass(frozen=True)
@@ -27,7 +38,7 @@ class Scenario:
     why: str
 
     def path(self) -> Path:
-        return WORKLOADS / self.workload
+        return workloads_root() / self.workload
 
 
 SCENARIOS: tuple[Scenario, ...] = (
