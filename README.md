@@ -38,6 +38,7 @@ asyncio.run(main())
 无需 GPU:默认使用确定性仿真后端(虚拟时钟 + 块级 KV 记账),同 seed 结果可复现。
 
 - [快速开始](docs/guide/quickstart.md) · [扩展指南](docs/guide/extending.md) · [设计规格](docs/specs/2026-11-07-phaseweaver-design.md)
+- 项目展示页:[site/index.html](site/index.html)(单文件,浏览器直接打开,无外部依赖)
 
 ## 场景档案
 
