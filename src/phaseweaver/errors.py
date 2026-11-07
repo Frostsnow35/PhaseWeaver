@@ -45,5 +45,9 @@ class RuntimeClosed(PhaseWeaverError):
     """The runtime is not running: start it (or use the PhaseWeaver facade)."""
 
 
+class PluginError(PhaseWeaverError):
+    """A third-party entry point is missing or failed to import."""
+
+
 class ConfigError(PhaseWeaverError):
     pass

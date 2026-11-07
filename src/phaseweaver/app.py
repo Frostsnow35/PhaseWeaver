@@ -15,7 +15,7 @@ import asyncio
 import random
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from phaseweaver.autopilot import AutopilotPolicy
 from phaseweaver.backends.base import BackendCaps, InferenceBackend
@@ -46,6 +46,7 @@ def mock_caps(capacity_gib: float = DEFAULT_CAPACITY_GIB) -> BackendCaps:
 
 
 def build_policy(name: str) -> Scheduler:
+    """Built-in policies first, then anything installed under `phaseweaver.policies`."""
     if name == "auto":
         return AutopilotPolicy()
     if name == "B0":
@@ -56,7 +57,14 @@ def build_policy(name: str) -> Scheduler:
         return SystemScheduler(SchedulerConfig())
     if name == "B2a":
         return YieldOnToolPolicy()
-    raise ValueError(f"unknown policy {name!r}")
+    return _policy_from_plugin(name)
+
+
+def _policy_from_plugin(name: str) -> Scheduler:
+    from phaseweaver.plugins import resolve_policy
+
+    plugin: Any = resolve_policy(name)
+    return cast(Scheduler, plugin())
 
 
 @dataclass
@@ -65,7 +73,9 @@ class PhaseWeaver:
 
     profile: str | Profile = "coding"
     capacity_gib: float = DEFAULT_CAPACITY_GIB
-    backend: InferenceBackend | None = None
+    #: an `InferenceBackend` instance, or the name of an installed plugin
+    #: (entry point group `phaseweaver.backends`, contract: zero-arg callable)
+    backend: InferenceBackend | str | None = None
     clock: Clock | None = None
     journal_path: Path | None = None
     run_id: str = "phaseweaver"
@@ -73,20 +83,30 @@ class PhaseWeaver:
 
     def __post_init__(self) -> None:
         self._profile: Profile = resolve(self.profile)
-        if self.backend is None:
-            self._clock: Clock = VirtualClock()
-            self._backend: InferenceBackend = MockBackend(
-                caps=mock_caps(self.capacity_gib), clock=self._clock
-            )
+        backend: InferenceBackend
+        clock: Clock
+        if isinstance(self.backend, str):
+            from phaseweaver.plugins import resolve_backend
+
+            factory: Any = resolve_backend(self.backend)
+            backend = factory()
+            clock = RealClock()
+            simulate = False if self.simulate_tools is None else self.simulate_tools
+        elif self.backend is None:
+            virtual = VirtualClock()
+            clock = virtual
+            backend = MockBackend(caps=mock_caps(self.capacity_gib), clock=virtual)
             # A simulated backend only makes sense with simulated tools + virtual
             # time; a real backend implies real time and real tool execution.
             simulate = True if self.simulate_tools is None else self.simulate_tools
         else:
-            self._clock = RealClock()
-            self._backend = self.backend
+            backend = self.backend
+            clock = RealClock()
             simulate = False if self.simulate_tools is None else self.simulate_tools
         if self.clock is not None:
-            self._clock = self.clock
+            clock = self.clock
+        self._clock = clock
+        self._backend = backend
         self._simulate_tools = simulate
         self._runtime: Runtime | None = None
 

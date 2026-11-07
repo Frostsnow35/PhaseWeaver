@@ -2,6 +2,10 @@
 
 Simulation must use VirtualClock; direct sleeping is forbidden in the mock path
 (see plan section 0).
+
+The driver is **event-driven** (F9): it sleeps until a timer is registered instead
+of polling `sleep(0)` forever. That removes the busy loop that made wall time grow
+superlinearly with the number of concurrent agents.
 """
 
 from __future__ import annotations
@@ -30,22 +34,28 @@ class RealClock:
 class VirtualClock:
     """Discrete-event virtual clock.
 
-    Time advances only when no coroutine can make progress, in which case the
-    clock jumps to the earliest pending timer. Same seed => same event order.
+    Time advances only when no coroutine can make progress: the driver jumps to the
+    earliest pending timer and resolves every waiter at that instant. Ties are
+    resolved FIFO by registration order, so the same seed yields the same event
+    order.
     """
 
     def __init__(self, start: float = 0.0, idle_rounds: int = 4) -> None:
+        #: kept for backwards compatibility; the driver no longer needs a heuristic
+        self._idle_rounds = idle_rounds
         self._now = start
         self._heap: list[tuple[float, int, asyncio.Future[None]]] = []
         self._seq = itertools.count()
-        self._idle_rounds = idle_rounds
-        self._wakeups = 0
-        self._idle = 0
-        self._last_wakeups = -1
+        self._wake: asyncio.Event | None = None
         self._driver: asyncio.Task[None] | None = None
 
     def now(self) -> float:
         return self._now
+
+    def _event(self) -> asyncio.Event:
+        if self._wake is None:
+            self._wake = asyncio.Event()
+        return self._wake
 
     async def wait(self, dt: float) -> None:
         if dt <= 0:
@@ -53,7 +63,7 @@ class VirtualClock:
             return
         fut: asyncio.Future[None] = asyncio.get_running_loop().create_future()
         heapq.heappush(self._heap, (self._now + dt, next(self._seq), fut))
-        self._wakeups += 1
+        self._event().set()
         await fut
 
     def start_driver(self) -> None:
@@ -67,27 +77,28 @@ class VirtualClock:
 
     async def _drive(self) -> None:
         while True:
-            await asyncio.sleep(0)
+            self._purge()
             if not self._heap:
-                self._last_wakeups = self._wakeups
-                self._idle = 0
+                self._event().clear()
+                await self._event().wait()
                 continue
-            if self._wakeups == self._last_wakeups:
-                self._idle += 1
-            else:
-                self._idle = 0
-                self._last_wakeups = self._wakeups
-            if self._idle >= self._idle_rounds:
-                self._jump()
-                self._idle = 0
+            deadline = self._heap[0][0]
+            if deadline > self._now:
+                self._now = deadline
+            self._fire(self._now)
+            # Let the coroutines we just woke make progress (and register new
+            # timers) before deciding whether to advance again.
+            await asyncio.sleep(0)
 
-    def _jump(self) -> None:
-        if not self._heap:
-            return
-        deadline = self._heap[0][0]
-        self._now = deadline
-        while self._heap and self._heap[0][0] <= deadline:
+    def _purge(self) -> None:
+        """Drop timers whose waiter was cancelled (they can never be honoured)."""
+        while self._heap and self._heap[0][2].done() and not self._heap[0][2].cancelled():
+            heapq.heappop(self._heap)
+        while self._heap and self._heap[0][2].cancelled():
+            heapq.heappop(self._heap)
+
+    def _fire(self, now: float) -> None:
+        while self._heap and self._heap[0][0] <= now:
             _, _, fut = heapq.heappop(self._heap)
             if not fut.done():
                 fut.set_result(None)
-            self._wakeups += 1

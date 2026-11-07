@@ -11,7 +11,7 @@
 |---|---|---|
 | 机制正确性 | 良好 | 103 测试全绿;不变量 property test;故障注入全覆盖 |
 | 工程质量 | 良好 | ruff/mypy 双平台 0 告警;无 TODO/type-ignore;0 个函数复杂度 >12 |
-| 性能(仿真) | 可用 | 8 agents 0.93 s;回放 83k events/s;但 >12 agents 墙钟超线性 |
+| 性能(仿真) | 良好 | 8 agents 0.25 s;回放 500k events/s;16 agents 墙钟 0.78 s |
 | 真实 GPU 证据 | **缺失** | L3 未验证(issue #3),所有性能数字标注 `[L1]` |
 | 交付闸门 | **6/6 PASS** | `python scripts/delivery_check.py` |
 
@@ -84,7 +84,7 @@ peak KV 1883 MiB,goodput 0.0899,p99 70.6 s。
 | F6 | 低 | `scenarios` 用相对路径,依赖 CWD | **已修**(`workloads_root()` + 环境变量覆盖) |
 | F7 | 低 | `run_task` 宽泛 `except` 把编程错误也记成 FAILED,不可诊断 | **已修**(`run_error` 事件含 traceback;`strict_errors` 开关) |
 | F8 | 低 | `_sync_lease` 用 `clock.wait(0.05)` 轮询等待容量 | **开放**(仿真下可接受;真实时钟下应改事件通知) |
-| F9 | 低 | 仿真墙钟在 >12 agents 超线性 | **开放**(事件驱动时钟;不影响真实引擎结论) |
+| F9 | 低 | 仿真墙钟在 >12 agents 超线性 | **已修**:虚拟时钟改事件驱动,16 agents 5.17s→0.78s(6.6×),回放 15.4ms→2.7ms |
 
 ## 6. 与交付标准的差距
 

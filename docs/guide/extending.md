@@ -82,16 +82,34 @@ Profile 只是默认值的集合,不影响运行时能力。新增场景时请�
 (`examples/workloads/*.toml`),并在 `docs/notes/experiments.md` 里记录一组数字——没有数字的
 场景档案等于没有验证。
 
-## 5. 模块化扩展(计划中)
+## 5. 模块化扩展(入口点,已实现)
 
-目前三类扩展需要在源码里注册。后续计划提供入口点:
+三类扩展都可以**独立发包**,不需要改运行时源码:
 
 ```toml
 [project.entry-points."phaseweaver.backends"]
-my_engine = "my_pkg.engine:MyEngine"
+my-engine = "my_pkg.engine:build_backend"      # 零参工厂 -> InferenceBackend
+
+[project.entry-points."phaseweaver.policies"]
+my-policy = "my_pkg.policy:MyPolicy"           # 可调用 -> Scheduler 实例
+
+[project.entry-points."phaseweaver.tools"]
+my-tool = "my_pkg.tools:MY_EXECUTOR"           # ToolExecutor 实例
 ```
 
-在此之前,扩展一个引擎建议单独发行一个包,依赖 `phaseweaver` 并实现协议。
+使用:
+
+```python
+async with PhaseWeaver(backend="my-engine", profile="research") as pw:
+    await pw.run("task", agent)
+```
+
+- 入口点**懒加载**:`import phaseweaver` 不会加载任何插件;
+- 插件加载失败会抛 `PluginError`,信息里包含**是哪个插件**、**哪个组**、原始异常;
+- 名字冲突时**内置策略优先**(`build_policy("B2")` 永远解析到内置实现)。
+
+完整可运行示例:[examples/plugin_backend/](../../examples/plugin_backend/)(`pip install -e .` 后
+`PhaseWeaver(backend="example-device")` 即可)。
 
 ## 开发约定(摘要)
 

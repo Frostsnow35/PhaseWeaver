@@ -55,7 +55,13 @@
 - [ ] F8 _sync_lease 轮询等待(技术债)
 - [ ] F9 仿真 >12 agents 超线性(技术债)
 
-## R5 扩展生态
+## R5 扩展生态(已完成)
+
+- [x] 入口点发现(`plugins.py`):backends / policies / tools 三组,懒加载
+- [x] `PhaseWeaver(backend="name")` 按名解析;`build_policy` 插件回退
+- [x] 失败信息含插件名与组名(`PluginError`);内置策略优先
+- [x] 可运行第三方示例包 `examples/plugin_backend/`
+- [x] 5 个单测(发现 / 损坏插件 / 未知名字 / 后端按名 / 策略插件)
 
 - `[project.entry-points."phaseweaver.backends"]` 等入口点,第三方包可安装
 - 提供一个"第三方风格"的示例包(`examples/plugin_backend/`),只依赖公开协议
