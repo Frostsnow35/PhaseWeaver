@@ -69,10 +69,6 @@ class InferenceContext:
     resident_bytes: int = 0
     offload_bytes: int = 0
     updated_seq: int | None = None
-    #: tokens inherited by reference from a parent context (KV fork), not copied
-    shared_tokens: int = 0
-    #: identity of the shared prefix group; children reuse it instead of re-prefilling
-    prefix_key: str | None = None
     #: KV handoff: the unit that currently owns this context's blocks, if any
     handed_off_to: str | None = None
 

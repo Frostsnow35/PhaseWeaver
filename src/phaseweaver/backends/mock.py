@@ -31,8 +31,6 @@ class _Allocation:
     tokens: int
     blocks: int
     offloaded: bool = False
-    shared_tokens: int = 0
-    prefix_key: str | None = None
 
 
 class MockBackend:
@@ -63,32 +61,9 @@ class MockBackend:
     def engine_events(self) -> list[EngineEvent]:
         return list(self._events)
 
-    async def submit(
-        self,
-        unit_id: str,
-        context_id: str,
-        tokens: int,
-        *,
-        shared_tokens: int = 0,
-        prefix_key: str | None = None,
-    ) -> Handle:
-        """Allocate only the *delta* over the shared prefix (KV fork)."""
+    async def submit(self, unit_id: str, context_id: str, tokens: int) -> Handle:
         handle = Handle(unit_id=unit_id, context_id=context_id, resident_tokens=tokens)
-        delta = max(0, tokens - shared_tokens)
-        delta_blocks = (delta + self._caps.block_tokens - 1) // self._caps.block_tokens
-        if self._used_blocks + delta_blocks > self._caps.blocks_total:
-            raise EngineOutOfMemory(
-                f"blocks exhausted: used={self._used_blocks} want={delta_blocks} "
-                f"cap={self._caps.blocks_total}"
-            )
-        self._allocs[context_id] = _Allocation(
-            tokens=tokens,
-            blocks=delta_blocks,
-            shared_tokens=shared_tokens,
-            prefix_key=prefix_key,
-        )
-        self._used_blocks += delta_blocks
-        self._emit(EngineEventKind.BLOCK_STORED, context_id, delta_blocks)
+        self._allocate(context_id, tokens)
         return handle
 
     async def complete(self, handle: Handle, out_tokens: int) -> GenStats:
@@ -230,7 +205,7 @@ class MockBackend:
         alloc = self._allocs.get(context_id)
         if alloc is None:
             return
-        own_tokens = max(0, tokens - alloc.shared_tokens)
+        own_tokens = tokens
         blocks = (own_tokens + self._caps.block_tokens - 1) // self._caps.block_tokens
         delta = blocks - alloc.blocks
         alloc.tokens = tokens

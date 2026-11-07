@@ -156,17 +156,28 @@ async def run_one(
             # Fork a group of subagents: the parent parks and waits (WAITING),
             # children share the parent's budget (SHARE) or get a hard cap (ISOLATE).
             mode = ForkMode.ISOLATE if workload.fork_mode == "isolate" else ForkMode.SHARE
-            await asyncio.gather(
-                *(
-                    handle.fork(
+            if workload.inherit_mode == "relay":
+                # Relay: children run one after another, each inheriting the KV from
+                # the previous one through the parent - every delegate starts warm.
+                for i in range(workload.fanout):
+                    await handle.fork(
                         f"sub-{i}",
                         lambda h, g=(i == 0): child(h, g),
                         mode=mode,
                         inherit=workload.inherit_mode,
                     )
-                    for i in range(workload.fanout)
+            else:
+                await asyncio.gather(
+                    *(
+                        handle.fork(
+                            f"sub-{i}",
+                            lambda h, g=(i == 0): child(h, g),
+                            mode=mode,
+                            inherit=workload.inherit_mode,
+                        )
+                        for i in range(workload.fanout)
+                    )
                 )
-            )
             await handle.reason(prompt_tokens=prompt, out_tokens=workload.out_tokens)
 
     pending: list[asyncio.Task[Any]] = []

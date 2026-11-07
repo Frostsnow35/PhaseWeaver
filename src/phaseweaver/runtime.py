@@ -217,16 +217,7 @@ class Runtime:
     ) -> None:
         handle = self._handles.get(unit.unit_id)
         restored = None
-        pending = self._pending_adopt.pop(unit.unit_id, None)
-        if pending is not None:
-            adopted_handle, adopted_tokens = pending
-            self._handles[unit.unit_id] = adopted_handle
-            unit.busy += 1
-            try:
-                await self._sync_lease(unit, ctx, self._lease_bytes(adopted_tokens))
-                self._set_context(unit, ctx, ContextState.ACTIVE, adopted_tokens)
-            finally:
-                unit.busy -= 1
+        if await self._take_pending(unit):
             return
         cap_tokens = self._max_tokens_for(unit)
         if cap_tokens is not None and reserve_tokens > cap_tokens:
@@ -427,6 +418,24 @@ class Runtime:
         blocks = limit // (caps.block_tokens * caps.bytes_per_token)
         return max(caps.block_tokens, blocks * caps.block_tokens)
 
+    async def _take_pending(self, unit: ExecutionUnit) -> bool:
+        """Pick up KV handed back on join: zero recompute resume (K12)."""
+        pending = self._pending_adopt.pop(unit.unit_id, None)
+        if pending is None:
+            return False
+        adopted_handle, adopted_tokens = pending
+        ctx = unit.context
+        if ctx is None:
+            return False
+        self._handles[unit.unit_id] = adopted_handle
+        unit.busy += 1
+        try:
+            await self._sync_lease(unit, ctx, self._lease_bytes(adopted_tokens))
+            self._set_context(unit, ctx, ContextState.ACTIVE, adopted_tokens)
+        finally:
+            unit.busy -= 1
+        return True
+
     async def _sync_lease(
         self, unit: ExecutionUnit, ctx: InferenceContext, want: int, *, wait_s: float = 600.0
     ) -> None:
@@ -564,14 +573,20 @@ class Runtime:
         #             the first child of a fork group can own it
         # (A "copy" mode was prototyped and dropped: duplicating the prefix doubles
         # residency and simply moves the failure to admission control.)
+        # Relay (K12c): each child in turn takes the KV from its predecessor via the
+        # parent, so every delegated task starts warm instead of only the first.
+        relay = inherit_mode == "relay"
+        can_inherit_mode = inherit_mode in ("handoff", "relay")
+        if depth == 0:
+            await self._take_pending(parent)
         parent_ctx = parent.context
         can_inherit = (
-            inherit_mode == "handoff"
+            can_inherit_mode
             and parent_ctx is not None
             and parent_ctx.resident_tokens > 0
             and parent_ctx.state in (ContextState.ACTIVE, ContextState.RETAINED)
         )
-        if can_inherit and depth == 0:
+        if can_inherit and (depth == 0 or relay):
             assert parent_ctx is not None  # narrowed by can_inherit
             parent_handle = self._handles.get(parent_id)
             if parent_handle is not None:
@@ -633,7 +648,7 @@ class Runtime:
                 # the child's context with zero recompute.
                 child_handle = self._handles.get(child.unit_id)
                 if (
-                    inherit_mode == "handoff"
+                    can_inherit_mode
                     and child.adopted_from is not None
                     and child_handle is not None
                     and parent_ctx is not None
