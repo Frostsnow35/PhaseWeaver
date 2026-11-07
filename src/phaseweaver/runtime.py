@@ -14,7 +14,8 @@ from phaseweaver.clock import Clock
 from phaseweaver.errors import AdmissionRejected, RuntimeClosed
 from phaseweaver.invariant import InvariantChecker
 from phaseweaver.journal import EventJournal
-from phaseweaver.leases import Budget, Lease, LeaseBroker
+from phaseweaver.leases import Budget, LeaseBroker
+from phaseweaver.ledger import UnitLedger
 from phaseweaver.policy import ClusterSnapshot, Scheduler
 from phaseweaver.tools.base import ToolResult, ToolSpec, ToolStatus
 from phaseweaver.tools.supervisor import ToolSupervisor
@@ -114,9 +115,7 @@ class Runtime:
             strict=self.config.strict_invariants,
             clock=clock,
         )
-        self._handles: dict[UnitId, Any] = {}
-        self._leases: dict[UnitId, Lease] = {}
-        self._park_times: dict[UnitId, list[float]] = {}
+        self.ledger = UnitLedger()
         self._fork_depth: dict[UnitId, int] = {}
         self._started = False
 
@@ -193,7 +192,7 @@ class Runtime:
             queued=sum(1 for u in units if u.phase is Phase.QUEUED),
             reasoning=sum(1 for u in units if u.phase is Phase.REASONING),
             slack_by_unit=slack,
-            recent_thrash={u: len(v) for u, v in self._park_times.items()},
+            recent_thrash={u: len(v) for u, v in self.ledger.park_times.items()},
             resident_bytes_by_unit={
                 u.unit_id: (u.context.resident_bytes if u.context is not None else 0)
                 for u in units
@@ -216,7 +215,7 @@ class Runtime:
             unit.context = ctx
         if ctx.state is not ContextState.ACTIVE:
             await self._activate(unit, ctx, prompt_tokens, prompt_tokens + out_tokens)
-        handle = self._handles[unit.unit_id]
+        handle = self.ledger.handles[unit.unit_id]
         # A growing conversation: the engine keeps every token it has seen, so the
         # reservation must cover the union of caller-supplied prompt and history.
         tokens = max(prompt_tokens, ctx.resident_tokens) + out_tokens
@@ -242,7 +241,7 @@ class Runtime:
     async def _activate(
         self, unit: ExecutionUnit, ctx: InferenceContext, prompt_tokens: int, reserve_tokens: int
     ) -> None:
-        handle = self._handles.get(unit.unit_id)
+        handle = self.ledger.handles.get(unit.unit_id)
         restored = None
         cap_tokens = self._max_tokens_for(unit)
         if cap_tokens is not None and reserve_tokens > cap_tokens:
@@ -263,7 +262,7 @@ class Runtime:
                 handle = await self.backend.submit(
                     unit.unit_id, ctx.context_id, prompt_tokens
                 )
-                self._handles[unit.unit_id] = handle
+                self.ledger.handles[unit.unit_id] = handle
             else:
                 self.journal.append("restore_started", unit_id=unit.unit_id)
                 restored = await self.backend.restore(handle)
@@ -359,7 +358,7 @@ class Runtime:
     async def _park(
         self, unit: ExecutionUnit, ctx: InferenceContext, disposition: Disposition
     ) -> None:
-        handle = self._handles.get(unit.unit_id)
+        handle = self.ledger.handles.get(unit.unit_id)
         if handle is None:
             return
         unit.busy += 1
@@ -372,7 +371,7 @@ class Runtime:
             if result.applied is Disposition.RETAIN:
                 pass  # I2: RETAINED must keep holding the KV lease
             else:
-                lease = self._leases.pop(unit.unit_id, None)
+                lease = self.ledger.leases.pop(unit.unit_id, None)
                 if lease is not None:
                     self.broker.release(lease.lease_id, reason="park")
             if result.applied is Disposition.OFFLOAD and result.moved_bytes > 0:
@@ -410,7 +409,7 @@ class Runtime:
         policy_config = getattr(self.policy, "config", None)
         window_s = float(getattr(policy_config, "thrash_window_s", 60.0))
         now = self.clock.now()
-        count = record_park(self._park_times, unit.unit_id, now, window_s)
+        count = record_park(self.ledger.park_times, unit.unit_id, now, window_s)
         if count >= 2:
             promoter = getattr(self.policy, "_state", None)
             if callable(promoter):
@@ -437,12 +436,12 @@ class Runtime:
         a unit that already holds a lease drops its own context (recompute later)
         so it can take the larger lease, instead of blocking everyone.
         """
-        current = self._leases.get(unit.unit_id)
+        current = self.ledger.leases.get(unit.unit_id)
         if current is not None and current.active and current.amount == want:
             return
         limit = self.broker.scope_limit(unit.scope)
         if limit is not None and want > limit:
-            handle = self._handles.get(unit.unit_id)
+            handle = self.ledger.handles.get(unit.unit_id)
             cap_tokens = self._max_tokens_for(unit)
             if not self.config.compact_on_quota or handle is None or not cap_tokens:
                 # A per-child cap cannot be satisfied by waiting for global capacity.
@@ -477,7 +476,7 @@ class Runtime:
                     scope=unit.scope,
                 )
                 if lease is not None:
-                    self._leases[unit.unit_id] = lease
+                    self.ledger.leases[unit.unit_id] = lease
                     return
             else:
                 # Atomic resize: the lease never disappears (F1).
@@ -486,7 +485,7 @@ class Runtime:
                 if want > current.amount and self.snapshot().pressure > 0.6:
                     # Self-yield: give the blocks back rather than deadlock.
                     self.broker.release(current.lease_id, reason="grow_self_drop")
-                    self._leases.pop(unit.unit_id, None)
+                    self.ledger.leases.pop(unit.unit_id, None)
                     current = None
                     continue
             if self.clock.now() >= deadline:
@@ -509,7 +508,7 @@ class Runtime:
         try:
             if not unit.phase.is_terminal():
                 self.registry.transition(unit.unit_id, Phase.CANCELLED, reason="parent_released")
-            self._leases.pop(unit.unit_id, None)
+            self.ledger.leases.pop(unit.unit_id, None)
             ctx_id = unit.context.context_id if unit.context is not None else None
             for lease in self.broker.active_leases():
                 if lease.unit_id == unit.unit_id or (
@@ -518,7 +517,7 @@ class Runtime:
                     self.broker.release(lease.lease_id, reason="unit_end")
             if unit.context is not None and unit.context.state is not ContextState.RELEASED:
                 self._set_context(unit, unit.context, ContextState.RELEASED)
-            handle = self._handles.pop(unit.unit_id, None)
+            handle = self.ledger.handles.pop(unit.unit_id, None)
             if handle is not None:
                 # Bookkeeping above is already consistent; shield the engine call so
                 # a cancellation can't leave the allocation half-released.
@@ -591,8 +590,8 @@ class Runtime:
         )
         if can_inherit and (depth == 0 or relay):
             assert parent_ctx is not None  # narrowed by can_inherit
-            parent_handle = self._handles.get(parent_id)
-            lease = self._leases.get(parent_id)
+            parent_handle = self.ledger.handles.get(parent_id)
+            lease = self.ledger.leases.get(parent_id)
             if parent_handle is not None and lease is not None:
                 child_ctx_id = f"ctx-{child.unit_id.replace('/', '_')}"
                 tokens = parent_ctx.resident_tokens
@@ -603,10 +602,10 @@ class Runtime:
                 if self.broker.transfer(
                     lease.lease_id, child.unit_id, child_ctx_id, self._lease_bytes(tokens)
                 ):
-                    self._handles.pop(parent_id, None)
-                    self._handles[child.unit_id] = moved
-                    self._leases.pop(parent_id, None)
-                    self._leases[child.unit_id] = lease
+                    self.ledger.handles.pop(parent_id, None)
+                    self.ledger.handles[child.unit_id] = moved
+                    self.ledger.leases.pop(parent_id, None)
+                    self.ledger.leases[child.unit_id] = lease
                     child.context = InferenceContext(
                         context_id=child_ctx_id, resident_tokens=tokens
                     )
@@ -647,8 +646,8 @@ class Runtime:
                 # Hand the KV back before releasing: on join the parent resumes from
                 # the child's context with zero recompute. Blocks and lease move in
                 # one synchronous step after the engine call.
-                child_handle = self._handles.get(child.unit_id)
-                child_lease = self._leases.get(child.unit_id)
+                child_handle = self.ledger.handles.get(child.unit_id)
+                child_lease = self.ledger.leases.get(child.unit_id)
                 if (
                     can_inherit_mode
                     and child.adopted_from is not None
@@ -668,9 +667,9 @@ class Runtime:
                         parent_ctx.context_id,
                         self._lease_bytes(tokens),
                     ):
-                        self._handles.pop(child.unit_id, None)
-                        self._leases.pop(child.unit_id, None)
-                        self._leases[parent_id] = child_lease
+                        self.ledger.handles.pop(child.unit_id, None)
+                        self.ledger.leases.pop(child.unit_id, None)
+                        self.ledger.leases[parent_id] = child_lease
                         self._set_context(child, child.context, ContextState.HANDED_OFF)
                         self._set_context(parent, parent_ctx, ContextState.RETAINED)
                         parent_ctx.handed_off_to = None

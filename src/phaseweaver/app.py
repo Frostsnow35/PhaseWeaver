@@ -12,6 +12,7 @@ the facade has no behaviour of its own beyond defaults.
 from __future__ import annotations
 
 import asyncio
+import random
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -140,10 +141,45 @@ class PhaseWeaver:
             priority=priority,
         )
 
-    async def run_many(self, tasks: list[tuple[str, AgentFn]]) -> list[TaskOutcome]:
-        """Run independent tasks concurrently - the common agent-fleet shape."""
-        coros = [self.run(label, fn) for label, fn in tasks]
-        return list(await asyncio.gather(*coros))
+    async def run_many(
+        self,
+        tasks: list[tuple[str, AgentFn]],
+        *,
+        arrival_rate_per_s: float | None = None,
+        max_inflight: int | None = None,
+        seed: int = 0,
+    ) -> list[TaskOutcome]:
+        """Run independent tasks - the common agent-fleet shape.
+
+        Two knobs matter in production and are both simulated faithfully:
+
+        - `arrival_rate_per_s`: tasks arrive over time (Poisson) instead of all at
+          once, which is what creates a queue in the first place;
+        - `max_inflight`: cap on concurrently *running* tasks, i.e. backpressure
+          applied by the caller rather than by memory pressure.
+
+        The result list preserves the input order regardless of completion order.
+        """
+        if not tasks:
+            return []
+        rng = random.Random(seed)
+        gate = asyncio.Semaphore(max_inflight) if max_inflight else None
+        outcomes: list[TaskOutcome | None] = [None] * len(tasks)
+
+        async def one(index: int, label: str, fn: AgentFn) -> None:
+            if gate is None:
+                outcomes[index] = await self.run(label, fn)
+                return
+            async with gate:
+                outcomes[index] = await self.run(label, fn)
+
+        pending: list[asyncio.Task[None]] = []
+        for index, (label, fn) in enumerate(tasks):
+            if arrival_rate_per_s and arrival_rate_per_s > 0:
+                await self._clock.wait(rng.expovariate(arrival_rate_per_s))
+            pending.append(asyncio.create_task(one(index, label, fn)))
+        await asyncio.gather(*pending)
+        return [outcome for outcome in outcomes if outcome is not None]
 
     def report(self) -> RunReport:
         return MetricsReducer.replay(self.runtime.journal)

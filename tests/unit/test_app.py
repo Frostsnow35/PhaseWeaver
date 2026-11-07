@@ -74,3 +74,36 @@ def test_profiles_are_complete() -> None:
         assert profile.policy in {"auto", "B0", "B1", "B2", "B2a"}
         assert profile.inherit_mode in {"none", "handoff", "relay"}
     assert isinstance(Profile.__dataclass_fields__, dict)
+
+
+def test_run_many_preserves_order_and_paces_arrivals() -> None:
+    async def scenario() -> PhaseWeaver:
+        async with PhaseWeaver(profile="coding", capacity_gib=2.0) as pw:
+            outcomes = await pw.run_many(
+                [(f"t{i}", _agent) for i in range(4)],
+                arrival_rate_per_s=0.5,
+                seed=1,
+            )
+            assert [o.phase for o in outcomes] == ["COMPLETED"] * 4
+            return pw
+
+    pw = asyncio.run(scenario())
+    arrivals = [
+        float(event.payload["arrival_ts"])
+        for event in pw.runtime.journal.by_type("unit_created")
+        if "arrival_ts" in event.payload
+    ]
+    assert len(arrivals) == 4
+    assert arrivals == sorted(arrivals)
+    assert arrivals[-1] > arrivals[0], "paced arrivals must be spread over time"
+
+
+def test_max_inflight_applies_backpressure() -> None:
+    async def burst(limit: int) -> float:
+        async with PhaseWeaver(profile="coding", capacity_gib=4.0) as pw:
+            await pw.run_many([(f"t{i}", _agent) for i in range(3)], max_inflight=limit)
+            return pw.report().wall_clock_s
+
+    serial = asyncio.run(burst(1))
+    parallel = asyncio.run(burst(3))
+    assert serial > parallel * 1.8
