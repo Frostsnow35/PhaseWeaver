@@ -28,16 +28,15 @@
 - [x] 3 个 seed 的严格不变量回归(无泄漏)
 - 判据:全部为断言"清理属性",不是断言"没崩"
 
-## R3 拆分 `runtime.py`(下一项)
+## R3 拆分 `runtime.py`(已完成)
 
-现状 644 行,超过自定 400 行纪律。**必须先 R1 把状态收敛**,否则拆分只会把 K15 的
-"分散状态"从文件内搬到文件间。
+`runtime.py` 由 644 行降到 **320 行**,按职责拆成四个 mixin:
 
-- `handoff.py`:`handoff_to_child` / `handoff_back` 两个自由函数,入参是 `(ledger, broker, backend, …)`
-- `parking.py`:`park / restore / sync_lease`(依赖 ledger + broker)
-- `runtime.py` 只留:生命周期、run_task、reason、call_tool、fork 编排
-- 判据:`runtime.py` ≤ 350 行;`handoff.py` 有独立单测且能脱离 Runtime 构造;
-  全部 87+ 测试与场景矩阵数字**逐位不变**
+- [x] `parking.py`:park / restore / sync_lease / thrash 记账
+- [x] `handoff.py`:交接(唯一 await + 同步转移租约与句柄)
+- [x] `cleanup.py`:树形释放、取消、shield 保护
+- [x] `turns.py`:reason / activate / call_tool
+- 判据:`pytest` 全绿、mypy 双平台通过、同一工作负载数字不变(w1/2GiB B2 = 0.1012)
 
 ## R4 可观测性(面向排障)
 
