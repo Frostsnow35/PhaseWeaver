@@ -57,12 +57,18 @@ CONTEXT_TRANSITIONS: Final[dict[ContextState, frozenset[ContextState]]] = {
             ContextState.DROPPED,
             ContextState.RELEASED,
             ContextState.HANDED_OFF,
+            # parking an already-retained context is a no-op, not an error
+            ContextState.RETAINED,
         }
     ),
-    ContextState.OFFLOADED: frozenset({ContextState.ACTIVE, ContextState.RELEASED}),
+    ContextState.OFFLOADED: frozenset(
+        {ContextState.ACTIVE, ContextState.RELEASED, ContextState.OFFLOADED}
+    ),
     ContextState.DROPPED: frozenset({ContextState.ACTIVE, ContextState.RELEASED}),
     #: KV handoff: ownership left this unit; it can come back (join) or be released.
-    ContextState.HANDED_OFF: frozenset({ContextState.ACTIVE, ContextState.RELEASED}),
+    ContextState.HANDED_OFF: frozenset(
+        {ContextState.ACTIVE, ContextState.RETAINED, ContextState.RELEASED}
+    ),
     ContextState.RELEASED: frozenset(),
 }
 

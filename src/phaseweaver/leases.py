@@ -198,6 +198,45 @@ class LeaseBroker:
         )
         return True
 
+    def transfer(
+        self, lease_id: LeaseId, unit_id: str, context_id: str | None, amount: int
+    ) -> bool:
+        """Move a lease to another unit/context and resize it, atomically.
+
+        Used by KV handoff: the blocks and the right to hold them move together, so
+        there is never a moment where a unit occupies the device without a lease
+        (nor a lease without residency).
+        """
+        lease = self._leases.get(lease_id)
+        if lease is None or not lease.active:
+            return False
+        delta = amount - lease.amount
+        limit = self.scope_limit(lease.scope)
+        over_scope = (
+            limit is not None
+            and lease.scope is not None
+            and delta > limit - self.scope_usage(lease.scope)
+        )
+        if delta > 0 and (over_scope or delta > self.available(lease.kind)):
+            return False
+        old_unit, old_context, old_amount = lease.unit_id, lease.context_id, lease.amount
+        lease.unit_id = unit_id
+        lease.context_id = context_id
+        lease.amount = amount
+        self._journal.append(
+            "lease_transferred",
+            unit_id=unit_id,
+            payload={
+                "lease_id": lease.lease_id,
+                "from_unit": old_unit,
+                "from_context": old_context,
+                "from_amount": old_amount,
+                "amount": amount,
+                "context_id": context_id,
+            },
+        )
+        return True
+
     def release(self, lease_id: LeaseId, reason: str = "released") -> None:
         lease = self._leases.get(lease_id)
         if lease is None or not lease.active:

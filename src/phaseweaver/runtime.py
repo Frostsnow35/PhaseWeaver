@@ -112,8 +112,6 @@ class Runtime:
         self._leases: dict[UnitId, Lease] = {}
         self._park_times: dict[UnitId, list[float]] = {}
         self._fork_depth: dict[UnitId, int] = {}
-        #: KV handoff handed back on join, picked up by the parent's next reason().
-        self._pending_adopt: dict[UnitId, tuple[Any, int]] = {}
         self._started = False
 
     # --- lifecycle ---------------------------------------------------------
@@ -223,8 +221,6 @@ class Runtime:
     ) -> None:
         handle = self._handles.get(unit.unit_id)
         restored = None
-        if await self._take_pending(unit):
-            return
         cap_tokens = self._max_tokens_for(unit)
         if cap_tokens is not None and reserve_tokens > cap_tokens:
             # K11: do not fail an oversized child - compact its context instead.
@@ -424,24 +420,6 @@ class Runtime:
         blocks = limit // (caps.block_tokens * caps.bytes_per_token)
         return max(caps.block_tokens, blocks * caps.block_tokens)
 
-    async def _take_pending(self, unit: ExecutionUnit) -> bool:
-        """Pick up KV handed back on join: zero recompute resume (K12)."""
-        pending = self._pending_adopt.pop(unit.unit_id, None)
-        if pending is None:
-            return False
-        adopted_handle, adopted_tokens = pending
-        ctx = unit.context
-        if ctx is None:
-            return False
-        self._handles[unit.unit_id] = adopted_handle
-        unit.busy += 1
-        try:
-            await self._sync_lease(unit, ctx, self._lease_bytes(adopted_tokens))
-            self._set_context(unit, ctx, ContextState.ACTIVE, adopted_tokens)
-        finally:
-            unit.busy -= 1
-        return True
-
     async def _sync_lease(
         self, unit: ExecutionUnit, ctx: InferenceContext, want: int, *, wait_s: float = 600.0
     ) -> None:
@@ -474,6 +452,14 @@ class Runtime:
             )
         deadline = self.clock.now() + wait_s
         while True:
+            # The engine is the ground truth: never promise blocks it cannot hold,
+            # even if the byte-level budget still looks fine (K15).
+            need = want if current is None else max(0, want - current.amount)
+            if need > self.backend.available_bytes():
+                if self.clock.now() >= deadline:
+                    raise AdmissionRejected(f"engine capacity exhausted for {unit.unit_id}")
+                await self.clock.wait(0.05)
+                continue
             if current is None:
                 lease = self.broker.acquire(
                     unit.unit_id,
@@ -583,8 +569,6 @@ class Runtime:
         # parent, so every delegated task starts warm instead of only the first.
         relay = inherit_mode == "relay"
         can_inherit_mode = inherit_mode in ("handoff", "relay")
-        if depth == 0:
-            await self._take_pending(parent)
         parent_ctx = parent.context
         can_inherit = (
             can_inherit_mode
@@ -595,34 +579,31 @@ class Runtime:
         if can_inherit and (depth == 0 or relay):
             assert parent_ctx is not None  # narrowed by can_inherit
             parent_handle = self._handles.get(parent_id)
-            if parent_handle is not None:
+            lease = self._leases.get(parent_id)
+            if parent_handle is not None and lease is not None:
                 child_ctx_id = f"ctx-{child.unit_id.replace('/', '_')}"
-                moved = await self.backend.handoff(
-                    parent_handle, child.unit_id, child_ctx_id
-                )
-                self._handles.pop(parent_id, None)
-                self._handles[child.unit_id] = moved
-                child.context = InferenceContext(
-                    context_id=child_ctx_id,
-                    resident_tokens=parent_ctx.resident_tokens,
-                )
-                child.adopted_from = parent_id
-                lease = self._leases.pop(parent_id, None)
-                if lease is not None:
-                    self.broker.release(lease.lease_id, reason="handoff")
-                self._set_context(parent, parent_ctx, ContextState.HANDED_OFF)
-                parent_ctx.handed_off_to = child.unit_id
-                self.journal.append(
-                    "context_state_changed",
-                    unit_id=parent_id,
-                    payload={
-                        "context_id": parent_ctx.context_id,
-                        "state": ContextState.HANDED_OFF.value,
-                        "handed_off_to": child.unit_id,
-                        "resident_bytes": 0,
-                        "resident_tokens": parent_ctx.resident_tokens,
-                    },
-                )
+                tokens = parent_ctx.resident_tokens
+                # Engine first (the only await), then everything else synchronously:
+                # the lease travels with the blocks, so no invariant can observe a
+                # unit that owns residency without holding a lease.
+                moved = await self.backend.handoff(parent_handle, child.unit_id, child_ctx_id)
+                if self.broker.transfer(
+                    lease.lease_id, child.unit_id, child_ctx_id, self._lease_bytes(tokens)
+                ):
+                    self._handles.pop(parent_id, None)
+                    self._handles[child.unit_id] = moved
+                    self._leases.pop(parent_id, None)
+                    self._leases[child.unit_id] = lease
+                    child.context = InferenceContext(
+                        context_id=child_ctx_id, resident_tokens=tokens
+                    )
+                    child.adopted_from = parent_id
+                    self._set_context(parent, parent_ctx, ContextState.HANDED_OFF)
+                    parent_ctx.handed_off_to = child.unit_id
+                else:
+                    # Cannot move the lease (budget/scope): give the blocks back and
+                    # let the child re-prefill. Never leave blocks unleased.
+                    await self.backend.handoff(moved, parent_id, parent_ctx.context_id)
         started = self.clock.now()
         try:
             if depth == 0:
@@ -651,23 +632,40 @@ class Runtime:
                         child.unit_id, Phase.FAILED if error else Phase.COMPLETED
                     )
                 # Hand the KV back before releasing: on join the parent resumes from
-                # the child's context with zero recompute.
+                # the child's context with zero recompute. Blocks and lease move in
+                # one synchronous step after the engine call.
                 child_handle = self._handles.get(child.unit_id)
+                child_lease = self._leases.get(child.unit_id)
                 if (
                     can_inherit_mode
                     and child.adopted_from is not None
                     and child_handle is not None
+                    and child_lease is not None
+                    and child.context is not None
                     and parent_ctx is not None
                     and parent_ctx.state is ContextState.HANDED_OFF
                 ):
                     given_back = await self.backend.handoff(
                         child_handle, parent_id, parent_ctx.context_id
                     )
-                    self._handles.pop(child.unit_id, None)
-                    self._pending_adopt[parent_id] = (
-                        given_back,
-                        child_handle.resident_tokens,
-                    )
+                    tokens = child_handle.resident_tokens
+                    if self.broker.transfer(
+                        child_lease.lease_id,
+                        parent_id,
+                        parent_ctx.context_id,
+                        self._lease_bytes(tokens),
+                    ):
+                        self._handles.pop(child.unit_id, None)
+                        self._leases.pop(child.unit_id, None)
+                        self._leases[parent_id] = child_lease
+                        self._set_context(child, child.context, ContextState.HANDED_OFF)
+                        self._set_context(parent, parent_ctx, ContextState.RETAINED)
+                        parent_ctx.handed_off_to = None
+                    else:
+                        # Give the blocks back so they remain covered by a lease.
+                        await self.backend.handoff(
+                            given_back, child.unit_id, child.context.context_id
+                        )
                 await self._release_unit(child)
                 self.registry.join(child.unit_id)
         finally:
