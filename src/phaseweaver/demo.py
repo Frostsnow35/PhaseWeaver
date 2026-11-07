@@ -380,6 +380,55 @@ def cmd_scenarios(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_timeline(args: argparse.Namespace) -> int:
+    from phaseweaver.journal import EventJournal
+    from phaseweaver.timeline import build_timeline
+
+    journal = EventJournal.load(Path(args.journal))
+    timeline = build_timeline(journal)
+    if args.out:
+        timeline.to_jsonl(Path(args.out))
+        print(f"wrote {len(timeline.spans)} spans to {args.out}")
+    else:
+        for span in timeline.spans:
+            print(
+                f"{span.unit_id:<40} {span.kind:<7} {span.name:<10} "
+                f"{span.start:7.2f} -> {span.end:7.2f} ({span.duration:6.2f}s)"
+            )
+    return 0
+
+
+def cmd_trace(args: argparse.Namespace) -> int:
+    from phaseweaver.journal import EventJournal
+    from phaseweaver.timeline import build_timeline
+    from phaseweaver.trace import format_trace, trace_unit
+
+    journal = EventJournal.load(Path(args.journal))
+    timeline = build_timeline(journal)
+    units = (
+        [
+            event.unit_id
+            for event in journal.by_type("unit_created")
+            if event.payload.get("kind") in ("agent", "subagent") and event.unit_id
+        ]
+        if args.all
+        else [args.unit]
+    )
+    for unit_id in units:
+        if unit_id is None:
+            continue
+        trace = trace_unit(journal, unit_id, timeline)
+        if args.all:
+            print(
+                f"{unit_id:<44} latency={trace.latency_s:7.2f}s "
+                f"dominant={trace.dominant[0]:<9} parks={trace.park_count:<3} "
+                f"recompute={trace.recompute_tokens}"
+            )
+        else:
+            print(format_trace(trace))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="phaseweaver")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -410,6 +459,15 @@ def main(argv: list[str] | None = None) -> int:
     sc.add_argument("--capacity-gib", type=float, default=2.0)
     sc.add_argument("--seeds", type=int, default=3)
 
+    tl = sub.add_parser("timeline", help="phase timeline from a saved journal")
+    tl.add_argument("--journal", required=True)
+    tl.add_argument("--out", default=None, help="write JSONL here instead of printing")
+
+    tr = sub.add_parser("trace", help="post-mortem for one unit (or all)")
+    tr.add_argument("--journal", required=True)
+    tr.add_argument("--unit", default=None)
+    tr.add_argument("--all", action="store_true")
+
     args = parser.parse_args(argv)
     if args.cmd == "compare":
         return cmd_compare(args)
@@ -421,6 +479,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_optimal(args)
     if args.cmd == "scenarios":
         return cmd_scenarios(args)
+    if args.cmd == "timeline":
+        return cmd_timeline(args)
+    if args.cmd == "trace":
+        return cmd_trace(args)
     raise SystemExit(f"unknown command {args.cmd}")
 
 

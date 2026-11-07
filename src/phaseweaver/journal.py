@@ -97,3 +97,44 @@ class EventJournal:
         if self._fh is not None:
             self._fh.close()
             self._fh = None
+
+    # --- replay from disk -------------------------------------------------
+    @classmethod
+    def load(cls, path: Path) -> EventJournal:
+        """Rebuild a journal from a JSONL file (for post-mortem analysis)."""
+        events: list[Event] = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            raw = json.loads(line)
+            events.append(
+                Event(
+                    seq=int(raw["seq"]),
+                    ts=float(raw["ts"]),
+                    run_id=str(raw["run_id"]),
+                    event=str(raw["event"]),
+                    unit_id=raw.get("unit_id"),
+                    phase_from=raw.get("phase_from"),
+                    phase_to=raw.get("phase_to"),
+                    cause_seq=raw.get("cause_seq"),
+                    payload=raw.get("payload") or {},
+                )
+            )
+        run_id = events[0].run_id if events else "loaded"
+        journal = cls(run_id=run_id, clock=_FrozenClock(events))
+        journal._events = events
+        journal._seq = events[-1].seq if events else 0
+        return journal
+
+
+class _FrozenClock:
+    """Clock stand-in for loaded journals: time never advances."""
+
+    def __init__(self, events: list[Event]) -> None:
+        self._last = events[-1].ts if events else 0.0
+
+    def now(self) -> float:
+        return self._last
+
+    async def wait(self, dt: float) -> None:  # pragma: no cover - never awaited
+        return None

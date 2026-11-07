@@ -72,6 +72,30 @@ async def parent(unit):
 
 需要串行接力(每个子都热启动)时用 `inherit="relay"`;想显式关闭用 `inherit="none"`。
 
+## 排障:这个任务为什么慢
+
+先留下日志,再离线分析(零运行时开销):
+
+```python
+from pathlib import Path
+async with PhaseWeaver(profile="coding", journal_path=Path("runs/run.jsonl")) as pw:
+    await pw.run("task", agent)
+```
+
+```bash
+# 单测追踪:相位耗时、park/restore、交接、诊断结论
+python -m phaseweaver.demo trace --journal runs/run.jsonl --unit run/root-0-0
+
+# 全部单元一览
+python -m phaseweaver.demo trace --journal runs/run.jsonl --all
+
+# 相位时间线(Gantt 数据)
+python -m phaseweaver.demo timeline --journal runs/run.jsonl --out runs/timeline.jsonl
+```
+
+`trace` 会把耗时归因到 `REASONING` / `ACTING` / `QUEUED` / `WAITING`,并给出可操作结论,
+例如"ACTING 占 78%:工具本身是瓶颈——这不是调度能解决的"。
+
 ## 看指标
 
 ```python
