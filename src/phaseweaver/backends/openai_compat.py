@@ -155,6 +155,19 @@ class OpenAICompatBackend:
             latency_ms=(time.monotonic() - start) * 1000,
         )
 
+    async def handoff(
+        self, handle: Handle, new_unit_id: str, new_context_id: str
+    ) -> Handle:
+        entry = self._resident.pop(handle.context_id, None)
+        if entry is not None:
+            self._resident[new_context_id] = entry
+        return Handle(
+            unit_id=new_unit_id,
+            context_id=new_context_id,
+            resident_tokens=handle.resident_tokens,
+            dropped=handle.dropped,
+        )
+
     async def truncate(self, handle: Handle, tokens: int) -> int:
         entry = self._resident.get(handle.context_id)
         target = max(1, min(tokens, handle.resident_tokens))

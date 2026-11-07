@@ -107,3 +107,7 @@ class InferenceBackend(Protocol):
     async def truncate(self, handle: Handle, tokens: int) -> int:
         """Shrink a context to at most `tokens`; returns the resulting size (K11)."""
         ...
+
+    async def handoff(self, handle: Handle, new_unit_id: str, new_context_id: str) -> Handle:
+        """Move ownership of this context's blocks to another unit (KV handoff)."""
+        ...

@@ -47,6 +47,7 @@ CONTEXT_TRANSITIONS: Final[dict[ContextState, frozenset[ContextState]]] = {
             ContextState.OFFLOADED,
             ContextState.DROPPED,
             ContextState.RELEASED,
+            ContextState.HANDED_OFF,
         }
     ),
     ContextState.RETAINED: frozenset(
@@ -55,10 +56,13 @@ CONTEXT_TRANSITIONS: Final[dict[ContextState, frozenset[ContextState]]] = {
             ContextState.OFFLOADED,
             ContextState.DROPPED,
             ContextState.RELEASED,
+            ContextState.HANDED_OFF,
         }
     ),
     ContextState.OFFLOADED: frozenset({ContextState.ACTIVE, ContextState.RELEASED}),
     ContextState.DROPPED: frozenset({ContextState.ACTIVE, ContextState.RELEASED}),
+    #: KV handoff: ownership left this unit; it can come back (join) or be released.
+    ContextState.HANDED_OFF: frozenset({ContextState.ACTIVE, ContextState.RELEASED}),
     ContextState.RELEASED: frozenset(),
 }
 

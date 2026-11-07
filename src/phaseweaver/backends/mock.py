@@ -179,6 +179,22 @@ class MockBackend:
             latency_ms=(self._clock.now() - start) * 1000,
         )
 
+    async def handoff(
+        self, handle: Handle, new_unit_id: str, new_context_id: str
+    ) -> Handle:
+        """Move an allocation's ownership to another unit (KV handoff, zero copy)."""
+        alloc = self._allocs.pop(handle.context_id, None)
+        new_handle = Handle(
+            unit_id=new_unit_id,
+            context_id=new_context_id,
+            resident_tokens=handle.resident_tokens,
+            dropped=handle.dropped,
+        )
+        if alloc is not None:
+            self._allocs[new_context_id] = alloc
+        handle.dropped = True
+        return new_handle
+
     async def truncate(self, handle: Handle, tokens: int) -> int:
         """Shrink the allocation in place; the dropped blocks return to the pool."""
         target = max(1, min(tokens, handle.resident_tokens))

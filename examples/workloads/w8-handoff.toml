@@ -1,0 +1,22 @@
+[workload]
+name = "w8-handoff"
+# 单子委托:父 Agent 把 KV 交给子 Agent 继续,join 时再交回(零重算)。
+agents = 8
+rounds = 3
+context_tokens = 4096
+out_tokens = 128
+slo_s = 240.0
+seed = 4
+fanout = 1
+sub_rounds = 2
+sub_context_tokens = 2048
+inherit_prefix = true
+
+[tool]
+kind = "python"
+p50_s = 3.0
+sigma = 0.5
+
+[arrival]
+kind = "poisson"
+rate_per_s = 0.4

@@ -31,6 +31,8 @@ class ContextState(StrEnum):
     RETAINED = "RETAINED"
     OFFLOADED = "OFFLOADED"
     DROPPED = "DROPPED"
+    #: ownership moved to another unit (KV handoff); no resident blocks, no lease
+    HANDED_OFF = "HANDED_OFF"
     RELEASED = "RELEASED"
 
 
@@ -71,6 +73,8 @@ class InferenceContext:
     shared_tokens: int = 0
     #: identity of the shared prefix group; children reuse it instead of re-prefilling
     prefix_key: str | None = None
+    #: KV handoff: the unit that currently owns this context's blocks, if any
+    handed_off_to: str | None = None
 
     @property
     def occupies_gpu(self) -> bool:

@@ -112,6 +112,8 @@ class Runtime:
         self._leases: dict[UnitId, Lease] = {}
         self._park_times: dict[UnitId, list[float]] = {}
         self._fork_depth: dict[UnitId, int] = {}
+        #: KV handoff handed back on join, picked up by the parent's next reason().
+        self._pending_adopt: dict[UnitId, tuple[Any, int]] = {}
         self._started = False
 
     # --- lifecycle ---------------------------------------------------------
@@ -215,6 +217,17 @@ class Runtime:
     ) -> None:
         handle = self._handles.get(unit.unit_id)
         restored = None
+        pending = self._pending_adopt.pop(unit.unit_id, None)
+        if pending is not None:
+            adopted_handle, adopted_tokens = pending
+            self._handles[unit.unit_id] = adopted_handle
+            unit.busy += 1
+            try:
+                await self._sync_lease(unit, ctx, self._lease_bytes(adopted_tokens))
+                self._set_context(unit, ctx, ContextState.ACTIVE, adopted_tokens)
+            finally:
+                unit.busy -= 1
+            return
         cap_tokens = self._max_tokens_for(unit)
         if cap_tokens is not None and reserve_tokens > cap_tokens:
             # K11: do not fail an oversized child - compact its context instead.
@@ -226,18 +239,13 @@ class Runtime:
                 payload={"to_tokens": reserve_tokens, "reason": "scope_quota"},
             )
         want = self._lease_bytes(reserve_tokens)
-        shared_tokens = ctx.shared_tokens if ctx.prefix_key is not None else 0
         unit.busy += 1
         try:
             # Lease first: the engine allocation must never outrun the budget.
             await self._sync_lease(unit, ctx, want)
             if handle is None:
                 handle = await self.backend.submit(
-                    unit.unit_id,
-                    ctx.context_id,
-                    prompt_tokens,
-                    shared_tokens=shared_tokens,
-                    prefix_key=ctx.prefix_key,
+                    unit.unit_id, ctx.context_id, prompt_tokens
                 )
                 self._handles[unit.unit_id] = handle
             else:
@@ -277,7 +285,12 @@ class Runtime:
             ctx.resident_tokens = tokens
         if state in (ContextState.ACTIVE,):
             ctx.resident_bytes = ctx.resident_tokens * self.backend.caps().bytes_per_token
-        elif state in (ContextState.DROPPED, ContextState.RELEASED, ContextState.OFFLOADED):
+        elif state in (
+            ContextState.DROPPED,
+            ContextState.RELEASED,
+            ContextState.OFFLOADED,
+            ContextState.HANDED_OFF,
+        ):
             # OFFLOADED still occupies CPU/disk, but nothing on the GPU.
             ctx.resident_bytes = 0
         self.journal.append(
@@ -447,13 +460,6 @@ class Runtime:
         deadline = self.clock.now() + wait_s
         while True:
             if current is None:
-                # Every unit's residency owns a prefix group keyed by its own id, so
-                # a child can reference it later. A child references its parent's
-                # group and pays only for the delta (KV fork).
-                prefix = ctx.prefix_key or unit.unit_id
-                shared = (
-                    self._lease_bytes(ctx.shared_tokens) if ctx.prefix_key is not None else 0
-                )
                 lease = self.broker.acquire(
                     unit.unit_id,
                     ctx.context_id,
@@ -461,8 +467,6 @@ class Runtime:
                     want,
                     unit.priority,
                     scope=unit.scope,
-                    prefix_key=prefix,
-                    shared_bytes=shared,
                 )
                 if lease is not None:
                     self._leases[unit.unit_id] = lease
@@ -551,16 +555,45 @@ class Runtime:
         # both try to park the same parent context.
         self._fork_depth[parent_id] = depth + 1
         child = self.registry.fork(parent_id, label, mode=mode, scope=scope_id)
-        # KV fork: the child references the parent's resident prefix instead of
-        # re-prefilling it. This only works because units are a *tree* - it is the
-        # reason the runtime models subagents as units rather than loose requests.
+        # KV handoff: the parent transfers ownership of its resident blocks to the
+        # child instead of copying them (or dropping and recomputing). Only the
+        # first child of a fork group can inherit - one context, one owner.
         parent_ctx = parent.context
-        if inherit_prefix and parent_ctx is not None and parent_ctx.resident_tokens > 0:
-            child.context = InferenceContext(
-                context_id=f"ctx-{child.unit_id.replace('/', '_')}",
-                prefix_key=parent_id,
-                shared_tokens=parent_ctx.resident_tokens,
-            )
+        if (
+            inherit_prefix
+            and depth == 0
+            and parent_ctx is not None
+            and parent_ctx.state in (ContextState.ACTIVE, ContextState.RETAINED)
+        ):
+            parent_handle = self._handles.get(parent_id)
+            if parent_handle is not None:
+                child_ctx_id = f"ctx-{child.unit_id.replace('/', '_')}"
+                moved = await self.backend.handoff(
+                    parent_handle, child.unit_id, child_ctx_id
+                )
+                self._handles.pop(parent_id, None)
+                self._handles[child.unit_id] = moved
+                child.context = InferenceContext(
+                    context_id=child_ctx_id,
+                    resident_tokens=parent_ctx.resident_tokens,
+                )
+                child.adopted_from = parent_id
+                lease = self._leases.pop(parent_id, None)
+                if lease is not None:
+                    self.broker.release(lease.lease_id, reason="handoff")
+                self._set_context(parent, parent_ctx, ContextState.HANDED_OFF)
+                parent_ctx.handed_off_to = child.unit_id
+                self.journal.append(
+                    "context_state_changed",
+                    unit_id=parent_id,
+                    payload={
+                        "context_id": parent_ctx.context_id,
+                        "state": ContextState.HANDED_OFF.value,
+                        "handed_off_to": child.unit_id,
+                        "resident_bytes": 0,
+                        "resident_tokens": parent_ctx.resident_tokens,
+                    },
+                )
         started = self.clock.now()
         try:
             if depth == 0:
@@ -587,6 +620,23 @@ class Runtime:
                 if not child.phase.is_terminal():
                     self.registry.transition(
                         child.unit_id, Phase.FAILED if error else Phase.COMPLETED
+                    )
+                # Hand the KV back before releasing: on join the parent resumes from
+                # the child's context with zero recompute.
+                child_handle = self._handles.get(child.unit_id)
+                if (
+                    child.adopted_from is not None
+                    and child_handle is not None
+                    and parent_ctx is not None
+                    and parent_ctx.state is ContextState.HANDED_OFF
+                ):
+                    given_back = await self.backend.handoff(
+                        child_handle, parent_id, parent_ctx.context_id
+                    )
+                    self._handles.pop(child.unit_id, None)
+                    self._pending_adopt[parent_id] = (
+                        given_back,
+                        child_handle.resident_tokens,
                     )
                 await self._release_unit(child)
                 self.registry.join(child.unit_id)

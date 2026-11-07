@@ -1,0 +1,22 @@
+[workload]
+name = "w8-handoff-off"
+# 对照组:同样的委托结构,但不做 KV 交接(父上下文被丢弃,子重新 prefill)。
+agents = 8
+rounds = 3
+context_tokens = 4096
+out_tokens = 128
+slo_s = 240.0
+seed = 4
+fanout = 1
+sub_rounds = 2
+sub_context_tokens = 2048
+inherit_prefix = false
+
+[tool]
+kind = "python"
+p50_s = 3.0
+sigma = 0.5
+
+[arrival]
+kind = "poisson"
+rate_per_s = 0.4

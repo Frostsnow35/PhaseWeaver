@@ -39,6 +39,8 @@ class ExecutionUnit:
     aggregate: UnitAggregate = field(default_factory=UnitAggregate)
     #: ISOLATE quota scope (K8); inherited by descendants, None = shared budget.
     scope: str | None = None
+    #: KV handoff: the unit this child took ownership of KV blocks from.
+    adopted_from: UnitId | None = None
     #: set while the runtime holds a lease state and phase state apart across an
     #: await (park/restore). Invariant checks skip such units; they are checked
     #: once quiescent.
