@@ -187,6 +187,22 @@ p99 −33.3%;**两种拓扑 failed=0、SLO=1.000**。w3 回归数字未变(0.089
 
 教训沉淀:跨资源的"所有权"操作必须是原子的;局部补状态只会在别的拓扑下翻车。
 
+## 2026-11-07 · 会话 17:运行时实体加固(工程化)
+
+按"参考优秀工程"的标准做了四件事,行为不变(所有实验数字未变):
+
+1. **纯函数外移**:`lease_bytes` / `max_tokens_for` / `state_for` / `record_park` 移到
+   `accounting.py`,脱离 backend 也能测;`runtime.py` 少了一层细节。
+2. **生命周期契约**:新增 `RuntimeClosed`,未 `start()` 或已 `shutdown()` 时调用会**显式报错**,
+   而不是静默地分配资源;`shutdown()` 幂等。
+3. **取消安全**:释放流程里对 `backend.abort` 用 `asyncio.shield` 包裹——记账已经完成,
+   引擎调用不能被半途取消而漏掉释放。
+4. **后端超时**:`RuntimeConfig.backend_timeout_s`(默认 300 s)把"引擎挂起"变成单元失败,
+   避免整棵 Agent 树无限等待;用"永不返回的后端"做了回归测试。
+
+`runtime.py` 仍有 644 行(> 自定的 400),下一位维护者需要知道:**fork/handoff 段是下一步拆分目标**,
+拆成 `handoff.py` 时需要把 `_handles/_leases/_set_context` 收敛成一个窄接口,否则会重演 K15 的教训。
+
 ## 待办(按优先级)
 
 | 编号 | 事项 | 为什么现在做 |

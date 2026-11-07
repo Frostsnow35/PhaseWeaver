@@ -41,5 +41,9 @@ class EngineOutOfMemory(PhaseWeaverError):
     """Runtime accounting bug: lease allowed but the engine cannot fit the blocks."""
 
 
+class RuntimeClosed(PhaseWeaverError):
+    """The runtime is not running: start it (or use the PhaseWeaver facade)."""
+
+
 class ConfigError(PhaseWeaverError):
     pass

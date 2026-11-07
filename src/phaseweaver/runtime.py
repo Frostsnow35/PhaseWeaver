@@ -8,9 +8,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from phaseweaver.accounting import lease_bytes, max_tokens_for, record_park, state_for
 from phaseweaver.backends.base import InferenceBackend
 from phaseweaver.clock import Clock
-from phaseweaver.errors import AdmissionRejected
+from phaseweaver.errors import AdmissionRejected, RuntimeClosed
 from phaseweaver.invariant import InvariantChecker
 from phaseweaver.journal import EventJournal
 from phaseweaver.leases import Budget, Lease, LeaseBroker
@@ -43,6 +44,9 @@ class RuntimeConfig:
     compact_on_quota: bool = True
     #: Default KV inheritance for forks when the caller does not specify one.
     default_inherit_mode: str = "none"
+    #: Hard ceiling for one backend call. A real engine can stall (driver reset, OOM
+    #: retry loop); without this the whole agent tree waits forever.
+    backend_timeout_s: float = 300.0
     #: Simulate tools against the virtual clock instead of spawning subprocesses.
     #: Deterministic and faithful to the declared tool latency; set False only when
     #: running against a real engine.
@@ -117,6 +121,13 @@ class Runtime:
         self._started = False
 
     # --- lifecycle ---------------------------------------------------------
+    def _ensure_open(self) -> None:
+        if not self._started:
+            raise RuntimeClosed(
+                f"runtime {self.config.run_id!r} is not running; "
+                "call await runtime.start() or use the PhaseWeaver facade"
+            )
+
     async def start(self) -> None:
         if self._started:
             return
@@ -138,6 +149,7 @@ class Runtime:
     async def run_task(
         self, label: str, fn: AgentFn, *, slo_s: float = 120.0, priority: int = 5
     ) -> TaskOutcome:
+        self._ensure_open()
         unit = self.registry.create_root(
             label, priority=priority, deadline=self.clock.now() + slo_s
         )
@@ -195,6 +207,7 @@ class Runtime:
         )
 
     async def reason(self, unit: ExecutionUnit, prompt_tokens: int, out_tokens: int) -> Any:
+        self._ensure_open()
         if unit.phase is Phase.QUEUED:
             self.registry.transition(unit.unit_id, Phase.REASONING)
         ctx = unit.context
@@ -212,7 +225,15 @@ class Runtime:
         # waiting for capacity, so phase alone would overstate device concurrency.
         self.journal.append("engine_active", unit_id=unit.unit_id, payload={"delta": 1})
         try:
-            stats = await self.backend.complete(handle, out_tokens)
+            stats = await asyncio.wait_for(
+                self.backend.complete(handle, out_tokens),
+                timeout=self.config.backend_timeout_s,
+            )
+        except TimeoutError as exc:
+            # A stalled engine must fail this unit, not hang the whole tree.
+            raise AdmissionRejected(
+                f"backend timed out after {self.config.backend_timeout_s}s"
+            ) from exc
         finally:
             self.journal.append("engine_active", unit_id=unit.unit_id, payload={"delta": -1})
         self._set_context(unit, ctx, ContextState.ACTIVE, tokens)
@@ -307,6 +328,7 @@ class Runtime:
     async def call_tool(
         self, unit: ExecutionUnit, spec: ToolSpec, args: dict[str, Any]
     ) -> ToolResult:
+        self._ensure_open()
         if unit.phase is Phase.QUEUED:
             self.registry.transition(unit.unit_id, Phase.REASONING)
         ctx = unit.context
@@ -346,7 +368,7 @@ class Runtime:
                 "park_started", unit_id=unit.unit_id, payload={"disposition": disposition.value}
             )
             result = await self.backend.park(handle, disposition)
-            self._set_context(unit, ctx, self._state_for(result.applied))
+            self._set_context(unit, ctx, state_for(result.applied))
             if result.applied is Disposition.RETAIN:
                 pass  # I2: RETAINED must keep holding the KV lease
             else:
@@ -381,46 +403,29 @@ class Runtime:
 
     @staticmethod
     def _state_for(disposition: Disposition) -> ContextState:
-        return {
-            Disposition.RETAIN: ContextState.RETAINED,
-            Disposition.DROP: ContextState.DROPPED,
-            Disposition.OFFLOAD: ContextState.OFFLOADED,
-            Disposition.RELEASE: ContextState.RELEASED,
-        }[disposition]
+        return state_for(disposition)
 
     def _detect_thrash(self, unit: ExecutionUnit) -> None:
         """Repeated parks inside the window raise a thrash event; the scheduler promotes."""
         policy_config = getattr(self.policy, "config", None)
         window_s = float(getattr(policy_config, "thrash_window_s", 60.0))
         now = self.clock.now()
-        history = [ts for ts in self._park_times.get(unit.unit_id, []) if now - ts <= window_s]
-        history.append(now)
-        self._park_times[unit.unit_id] = history
-        if len(history) >= 2:
+        count = record_park(self._park_times, unit.unit_id, now, window_s)
+        if count >= 2:
             promoter = getattr(self.policy, "_state", None)
             if callable(promoter):
-                promoter(unit.unit_id).park_count_window = len(history)
+                promoter(unit.unit_id).park_count_window = count
             self.journal.append(
                 "thrash",
                 unit_id=unit.unit_id,
-                payload={"count": len(history), "window_s": window_s},
+                payload={"count": count, "window_s": window_s},
             )
 
     def _lease_bytes(self, tokens: int) -> int:
-        """Round up to engine block granularity so the byte budget and the
-        engine's block allocator can never disagree."""
-        caps = self.backend.caps()
-        blocks = (tokens + caps.block_tokens - 1) // caps.block_tokens
-        return blocks * caps.block_tokens * caps.bytes_per_token
+        return lease_bytes(self.backend.caps(), tokens)
 
     def _max_tokens_for(self, unit: ExecutionUnit) -> int | None:
-        """Largest context the unit's own quota can hold, in tokens."""
-        limit = self.broker.scope_limit(unit.scope)
-        if limit is None:
-            return None
-        caps = self.backend.caps()
-        blocks = limit // (caps.block_tokens * caps.bytes_per_token)
-        return max(caps.block_tokens, blocks * caps.block_tokens)
+        return max_tokens_for(self.backend.caps(), self.broker, unit.scope)
 
     async def _sync_lease(
         self, unit: ExecutionUnit, ctx: InferenceContext, want: int, *, wait_s: float = 600.0
@@ -515,7 +520,12 @@ class Runtime:
                 self._set_context(unit, unit.context, ContextState.RELEASED)
             handle = self._handles.pop(unit.unit_id, None)
             if handle is not None:
-                await self.backend.abort(handle, "unit_end")
+                # Bookkeeping above is already consistent; shield the engine call so
+                # a cancellation can't leave the allocation half-released.
+                try:
+                    await asyncio.shield(self.backend.abort(handle, "unit_end"))
+                except asyncio.CancelledError:
+                    raise
         finally:
             unit.busy -= 1
 
