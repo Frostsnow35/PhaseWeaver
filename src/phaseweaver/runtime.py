@@ -208,7 +208,13 @@ class Runtime:
         # reservation must cover the union of caller-supplied prompt and history.
         tokens = max(prompt_tokens, ctx.resident_tokens) + out_tokens
         await self._sync_lease(unit, ctx, self._lease_bytes(tokens))
-        stats = await self.backend.complete(handle, out_tokens)
+        # Count only units actually generating: units in REASONING may still be
+        # waiting for capacity, so phase alone would overstate device concurrency.
+        self.journal.append("engine_active", unit_id=unit.unit_id, payload={"delta": 1})
+        try:
+            stats = await self.backend.complete(handle, out_tokens)
+        finally:
+            self.journal.append("engine_active", unit_id=unit.unit_id, payload={"delta": -1})
         self._set_context(unit, ctx, ContextState.ACTIVE, tokens)
         return stats
 

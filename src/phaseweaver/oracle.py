@@ -42,6 +42,19 @@ class AlphaModel:
             return max(1, tasks)
         return max(1, min(tasks, self.capacity_bytes // per_task))
 
+    def duty_streams(self, k: int, reasoning_s: float, tool_s: float) -> float:
+        """Sustained concurrency under phase alternation.
+
+        Each task spends `tool_s` away from the device every round, so with k
+        resident contexts the average number of streams actually generating is at
+        most `k * reasoning/(reasoning+tool)`. Staggering cannot beat this: the
+        device can only serve contexts that are in their reasoning phase.
+        """
+        total = reasoning_s + max(0.0, tool_s)
+        if total <= 0:
+            return float(max(1, k))
+        return max(0.0, min(float(k), k * reasoning_s / total))
+
 
 def lower_bound_makespan(
     *,
@@ -58,14 +71,61 @@ def lower_bound_makespan(
     total_prefill = agents * rounds * prefill_tokens
     total_decode = agents * rounds * decode_tokens
 
-    k = model.max_streams(prefill_tokens, agents)
-    agg_prefill = model.aggregate(k, model.prefill_tok_per_s)
-    agg_decode = model.aggregate(k, model.decode_tok_per_s)
-
-    device = max(total_prefill / agg_prefill, total_decode / agg_decode)
-    path = rounds * (
-        prefill_tokens / model.prefill_tok_per_s
-        + decode_tokens / model.decode_tok_per_s
-        + max(0.0, tool_s)
+    reasoning_s = (
+        prefill_tokens / model.prefill_tok_per_s + decode_tokens / model.decode_tok_per_s
     )
-    return max(device, path)
+    k = model.max_streams(prefill_tokens, agents)
+
+    def device_bound(streams: int) -> float:
+        return max(
+            total_prefill / model.aggregate(streams, model.prefill_tok_per_s),
+            total_decode / model.aggregate(streams, model.decode_tok_per_s),
+        )
+
+    # Valid lower bound: assume the device stays saturated at k streams.
+    device = device_bound(k)
+    path = rounds * (reasoning_s + max(0.0, tool_s))
+    return max(device, path, 1e-9)
+
+
+def duty_cycle_estimate(
+    *,
+    agents: int,
+    rounds: int,
+    prefill_tokens: int,
+    decode_tokens: int,
+    tool_s: float,
+    model: AlphaModel,
+) -> float:
+    """Steady-state estimate, NOT a lower bound.
+
+    If every task cycles reasoning -> tool in lockstep, the average number of
+    streams that can be generating is `k * reasoning/(reasoning+tool)`. The real
+    lower bound may be better than this (perfect staggering can fill the gaps),
+    so treat this as a *prediction of the phase-aligned regime*, useful for
+    explaining a gap - never as proof of optimality.
+    """
+    reasoning_s = (
+        prefill_tokens / model.prefill_tok_per_s + decode_tokens / model.decode_tok_per_s
+    )
+    k = model.max_streams(prefill_tokens, agents)
+    n_eff = model.duty_streams(k, reasoning_s, tool_s)
+    if n_eff < 1.0:
+        n_eff = 1.0
+    total_prefill = agents * rounds * prefill_tokens
+    total_decode = agents * rounds * decode_tokens
+    return max(
+        rules_device(total_prefill, total_decode, n_eff, model),
+        rounds * (reasoning_s + max(0.0, tool_s)),
+    )
+
+
+def rules_device(
+    total_prefill: int, total_decode: int, streams: float, model: AlphaModel
+) -> float:
+    """Estimated device seconds: prefill and decode work are added, because with a
+    handful of streams the phases do not overlap enough to hide either one."""
+    n = max(1, int(round(streams)))
+    return total_prefill / model.aggregate(n, model.prefill_tok_per_s) + total_decode / (
+        model.aggregate(n, model.decode_tok_per_s)
+    )

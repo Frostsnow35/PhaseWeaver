@@ -40,6 +40,12 @@ class RunReport:
     #: NOT reasoning. This is the "pinned while idle" waste, and unlike
     #: gpu_idle_wasted_bytes_s it is non-zero whenever anyone yields badly.
     kv_occupancy_waste_bytes_s: float = 0.0
+    #: seconds during which at least one unit was decoding/prefilling
+    gpu_busy_s: float = 0.0
+    #: integral of the number of concurrent reasoning units over time
+    concurrency_s: float = 0.0
+    #: tasks that were ready but waiting for capacity, sampled per event
+    queue_events: int = 0
     admission_rejects: int = 0
     restore_latencies_ms: list[float] = field(default_factory=list)
     queue_waits_ms: list[float] = field(default_factory=list)
@@ -81,6 +87,26 @@ class RunReport:
         return (self.thrash_count / minutes) if minutes > 0 else 0.0
 
     @property
+    def gpu_busy_fraction(self) -> float:
+        """How much of the wall clock the device was doing inference.
+
+        A low value means the run is dominated by tool phases (inherent) rather
+        than by scheduler inefficiency - this is what explains a large
+        optimality gap without hand-waving.
+        """
+        return (self.gpu_busy_s / self.wall_clock_s) if self.wall_clock_s > 0 else 0.0
+
+    @property
+    def mean_concurrency(self) -> float:
+        """Average number of streams sharing the device.
+
+        This is the number the α throughput model cares about: a run can be
+        "busy" 99% of the time while averaging 1.5 streams, which is exactly why
+        a bound computed for k_max streams looks unreachable.
+        """
+        return (self.concurrency_s / self.wall_clock_s) if self.wall_clock_s > 0 else 0.0
+
+    @property
     def jain_fairness(self) -> float:
         """Jain index over task latencies: 1.0 = perfectly equal, 1/n = one hog."""
         if len(self.latencies_ms) < 2:
@@ -104,6 +130,7 @@ class RunReport:
             "idle_waste_mib_s": round(self.gpu_idle_wasted_bytes_s / 1024 / 1024, 1),
             "kv_waste_mib_s": round(self.kv_occupancy_waste_bytes_s / 1024 / 1024, 1),
             "jain": round(self.jain_fairness, 3),
+            "gpu_busy": round(self.gpu_busy_fraction, 3),
         }
 
 
@@ -117,12 +144,16 @@ class MetricsReducer:
         last_ts = 0.0
         idle_accum = 0.0
         waste_accum = 0.0
+        active_streams = 0
 
         def resident_total() -> int:
             return sum(resident.values())
 
         for ev in journal.events():
             dt = max(0.0, ev.ts - last_ts)
+            if reasoning_units:
+                report.gpu_busy_s += dt
+            report.concurrency_s += dt * active_streams
             if not reasoning_units:
                 idle_accum += dt * resident_total()
             for uid, size in resident.items():
@@ -159,6 +190,8 @@ class MetricsReducer:
                         report.failed += 1
                     else:
                         report.cancelled += 1
+            elif ev.event == "engine_active":
+                active_streams = max(0, active_streams + int(ev.payload.get("delta", 0)))
             elif ev.event == "context_state_changed" and ev.unit_id:
                 resident[ev.unit_id] = int(ev.payload.get("resident_bytes", 0))
                 report.peak_resident_bytes = max(report.peak_resident_bytes, resident_total())

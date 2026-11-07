@@ -280,7 +280,7 @@ def cmd_sweep(args: argparse.Namespace) -> int:
 
 
 def cmd_optimal(args: argparse.Namespace) -> int:
-    from phaseweaver.oracle import AlphaModel, lower_bound_makespan
+    from phaseweaver.oracle import AlphaModel, duty_cycle_estimate, lower_bound_makespan
 
     workload = Workload.load(Path(args.workload))
     report = asyncio.run(run_one(workload, args.policy, capacity_gib=args.capacity_gib))
@@ -304,7 +304,21 @@ def cmd_optimal(args: argparse.Namespace) -> int:
     gap = (observed - bound_s) / bound_s * 100 if bound_s else 0.0
     print(
         f"[L2] optimality policy={args.policy} observed={observed:.1f}s "
-        f"bound={bound_s:.1f}s gap={gap:.1f}% bound_kind=alpha_lower_bound"
+        f"bound={bound_s:.1f}s gap={gap:.1f}% gpu_busy={report.gpu_busy_fraction:.3f} "
+        f"mean_conc={report.mean_concurrency:.2f} bound_kind=alpha_lower_bound"
+    )
+    estimate = duty_cycle_estimate(
+        agents=workload.agents,
+        rounds=workload.rounds,
+        prefill_tokens=workload.context_tokens + workload.out_tokens,
+        decode_tokens=workload.out_tokens,
+        tool_s=workload.tool_p50_s,
+        model=model,
+    )
+    est_gap = (observed - estimate) / estimate * 100 if estimate else 0.0
+    print(
+        f"[L2] gap_decomposition duty_estimate={estimate:.1f}s est_gap={est_gap:.1f}% "
+        f"note=estimate is the phase-aligned regime, not a lower bound"
     )
     return 0
 
