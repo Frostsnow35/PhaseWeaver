@@ -15,6 +15,8 @@ KV Cache 仍占着显存,其他 Agent 只能排队。PhaseWeaver 把这个切换
 > 它不是编排框架。契约只有一条:推理与工具调用经过 `unit.reason()` / `unit.call_tool()`,
 > 让运行时看见阶段切换。详见 [它是什么](docs/guide/what-is-it.md)。
 
+**Live demo**: <https://frostsnow35.github.io/PhaseWeaver/> · 单文件、无外部依赖、可离线打开
+
 ## 五分钟开始
 
 ```python
@@ -90,6 +92,15 @@ uv run mypy --platform linux src/phaseweaver
 
 工程约定见 [CONTRIBUTING.md](CONTRIBUTING.md),取舍记录见 [docs/adr/](docs/adr/),
 开发历史与教训见 [docs/notes/devlog.md](docs/notes/devlog.md)。
+
+### Demo 站点
+
+静态页在 [`site/index.html`](site/index.html),由 GitHub Actions 发布到 GitHub Pages:
+
+- 工作流:`.github/workflows/pages.yml`(构建 `site/` 制品 → `deploy-pages`)
+- 仓库 Settings → Pages → **Source: GitHub Actions**(只需设置一次)
+- 本地预览:`python -m http.server 8000 -d site`,或直接打开该文件
+- 单文件、无外部请求、可离线打开;动效在 `prefers-reduced-motion` 下自动关闭
 
 ## 状态与边界
 
