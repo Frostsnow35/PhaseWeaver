@@ -16,6 +16,33 @@ PhaseWeaver 位于 Agent 编排框架与 LLM 推理引擎之间,把 Agent、Suba
 - 下一步:K6 修正 B4 下界 → K10 队列反馈成本模型 → M5 真实引擎适配。
 - 详见 [docs/notes/experiments.md](docs/notes/experiments.md)。
 
+## 接入真实引擎
+
+引擎无关不是口号,而是可执行的适配器层:
+
+```python
+from phaseweaver.backends.vllm import VLLMBackend
+from phaseweaver.backends.openai_compat import OpenAICompatConfig
+from phaseweaver.clock import RealClock
+from phaseweaver.runtime import Runtime, RuntimeConfig
+
+backend = VLLMBackend(OpenAICompatConfig(base_url="http://127.0.0.1:8000", model="qwen2.5-7b"))
+runtime = Runtime(
+    backend=backend,
+    clock=RealClock(),                  # 真实时钟
+    budget=Budget(total_bytes=backend.caps().capacity_bytes),
+    policy=SystemScheduler(SchedulerConfig()),
+    config=RuntimeConfig(simulate_tools=False),   # 真实执行工具
+)
+```
+
+能力协商是显式的:OpenAI 兼容接口没有"按请求卸载 KV",所以 `OFFLOAD` 会**自动降级为
+`DROP`**(重算),事件里记录 `degraded_from="offload"`。vLLM 的 `/sleep` `/wake_up` 是
+引擎级副作用,必须显式 `allow_engine_sleep=True` 才可用。
+
+`tests/integration/test_openai_backend.py` 用一个本地假 OpenAI 服务验证了整条链路
+(无需 GPU):HTTP 调用、能力降级、重算记账、Runtime 原样运行。
+
 ## 本机环境注意事项(sandbox)
 
 1. `uv` 缓存需重定向:`$env:UV_CACHE_DIR=<repo>\.uv-cache`。
