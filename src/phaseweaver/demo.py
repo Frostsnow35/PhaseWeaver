@@ -101,6 +101,10 @@ def build_policy(name: str) -> Scheduler:
         return SystemScheduler(SchedulerConfig())
     if name == "B2c":
         return SystemScheduler(SchedulerConfig(use_cost_model=True))
+    if name == "auto":
+        from phaseweaver.autopilot import AutopilotPolicy
+
+        return AutopilotPolicy()
     raise ValueError(f"unknown policy {name}")
 
 
@@ -324,6 +328,58 @@ def cmd_optimal(args: argparse.Namespace) -> int:
     return 0
 
 
+def _mean(values: list[float]) -> float:
+    return sum(values) / len(values) if values else 0.0
+
+
+def cmd_scenarios(args: argparse.Namespace) -> int:
+    """Run each concrete scenario with its recommended configuration vs the baseline."""
+    from phaseweaver.scenarios import SCENARIOS
+
+    print(f"[L1] scenario sweep capacity={args.capacity_gib}GiB seeds={args.seeds}")
+    print(
+        f"{'scenario':<12}{'config':<18}{'goodput':>9}{'p99':>9}{'slo':>8}"
+        f"{'kv_waste':>10}{'failed':>8}"
+    )
+    for scenario in SCENARIOS:
+        workload = Workload.load(scenario.path())
+        if scenario.recommended == "auto":
+            setups = [
+                ("baseline(B0)", "B0", "none"),
+                ("B2(fixed)", "B2", "none"),
+                ("autopilot", "auto", "none"),
+            ]
+        else:
+            setups = [
+                ("baseline(B0)", "B0", "none"),
+                ("B2(fixed)", "B2", "none"),
+                ("handoff", "B2", "handoff"),
+            ]
+        for label, policy, inherit in setups:
+            goodput: list[float] = []
+            p99: list[float] = []
+            slo: list[float] = []
+            waste: list[float] = []
+            failed: list[float] = []
+            for seed in range(args.seeds):
+                workload.seed = seed
+                workload.inherit_mode = inherit
+                report = asyncio.run(
+                    run_one(workload, policy, capacity_gib=args.capacity_gib)
+                )
+                goodput.append(report.goodput)
+                p99.append(report.latency_p99_ms / 1000)
+                slo.append(report.slo_attainment_rate)
+                waste.append(report.kv_occupancy_waste_bytes_s / 1024 / 1024)
+                failed.append(float(report.failed))
+            _mean_ = _mean
+            print(
+                f"{scenario.key:<12}{label:<18}{_mean_(goodput):>9.4f}{_mean_(p99):>9.1f}"
+                f"{_mean_(slo):>8.3f}{_mean_(waste):>10.0f}{_mean_(failed):>8.1f}"
+            )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="phaseweaver")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -350,6 +406,10 @@ def main(argv: list[str] | None = None) -> int:
     op.add_argument("--policy", default="B2")
     op.add_argument("--capacity-gib", type=float, default=8.0)
 
+    sc = sub.add_parser("scenarios", help="run the concrete usage scenarios")
+    sc.add_argument("--capacity-gib", type=float, default=2.0)
+    sc.add_argument("--seeds", type=int, default=3)
+
     args = parser.parse_args(argv)
     if args.cmd == "compare":
         return cmd_compare(args)
@@ -359,6 +419,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_sweep(args)
     if args.cmd == "optimal":
         return cmd_optimal(args)
+    if args.cmd == "scenarios":
+        return cmd_scenarios(args)
     raise SystemExit(f"unknown command {args.cmd}")
 
 
