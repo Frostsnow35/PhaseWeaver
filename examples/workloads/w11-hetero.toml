@@ -1,0 +1,19 @@
+# R6 heterogeneous tools: even agents ~10x longer tools than odd agents.
+# Uniform agents cannot benefit from phase alignment (duty bound); this workload is
+# the case where instantaneous overlap can dip below the bound.
+[workload]
+name = "w11-hetero"
+agents = 8
+rounds = 4
+context_tokens = 4096
+out_tokens = 64
+slo_s = 600.0
+seed = 0
+
+[tool]
+p50_s = 5.0
+sigma = 0.2
+hetero = 0.9
+
+[arrival]
+rate_per_s = 0.5

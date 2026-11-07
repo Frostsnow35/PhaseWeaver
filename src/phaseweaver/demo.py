@@ -18,9 +18,8 @@ from phaseweaver.backends.mock import MockBackend
 from phaseweaver.clock import VirtualClock
 from phaseweaver.leases import Budget
 from phaseweaver.metrics import MetricsReducer, RunReport
-from phaseweaver.policy import PinAlwaysPolicy, Scheduler, TtlEvictPolicy, YieldOnToolPolicy
+from phaseweaver.policy import Scheduler
 from phaseweaver.runtime import Runtime, RuntimeConfig
-from phaseweaver.scheduler import SchedulerConfig, SystemScheduler
 from phaseweaver.tools.base import ToolSpec
 from phaseweaver.types import ForkMode
 
@@ -49,6 +48,10 @@ class Workload:
     inherit_mode: str = "none"
     #: 2 means each subagent also delegates to a grandchild
     nested_depth: int = 1
+    #: R6: 0 keeps tools uniform; >0 splits agents into short/long tool groups
+    #: (even index: * (1+h), odd index: * (1-h)) so phase alignment has something
+    #: to align.
+    tool_hetero: float = 0.0
 
     @classmethod
     def load(cls, path: Path) -> Workload:
@@ -75,6 +78,7 @@ class Workload:
                 or ("handoff" if w.get("inherit_prefix") in (True, "true") else "none")
             ),
             nested_depth=int(w.get("nested_depth", 1)),
+            tool_hetero=float(t.get("hetero", 0.0)),
         )
 
 
@@ -91,21 +95,13 @@ def caps(capacity_gib: float = 8.0) -> BackendCaps:
 
 
 def build_policy(name: str) -> Scheduler:
-    if name == "B0":
-        return PinAlwaysPolicy()
-    if name == "B1":
-        return TtlEvictPolicy(ttl_s=5.0)
-    if name == "B2a":
-        return YieldOnToolPolicy()
-    if name == "B2":
-        return SystemScheduler(SchedulerConfig())
-    if name == "B2c":
-        return SystemScheduler(SchedulerConfig(use_cost_model=True))
-    if name == "auto":
-        from phaseweaver.autopilot import AutopilotPolicy
+    """Single source of truth: policy names are owned by the facade, not the CLI.
 
-        return AutopilotPolicy()
-    raise ValueError(f"unknown policy {name}")
+    (Keeping a second copy here is how `align2` silently became "unknown policy".)
+    """
+    from phaseweaver.app import build_policy as facade_build_policy
+
+    return facade_build_policy(name)
 
 
 async def run_one(
@@ -162,9 +158,9 @@ async def run_one(
             prompt_tokens=workload.context_tokens // 2, out_tokens=workload.out_tokens
         )
 
-    async def agent(handle: Any) -> None:
+    async def agent(handle: Any, specs: list[ToolSpec] | None = None) -> None:
         prompt = workload.context_tokens
-        for spec in tools:
+        for spec in specs or tools:
             await handle.reason(prompt_tokens=prompt, out_tokens=workload.out_tokens)
             await handle.call_tool(spec, {"code": "pass"})
             prompt += workload.out_tokens  # a conversation grows every round
@@ -200,9 +196,27 @@ async def run_one(
     for i in range(workload.agents):
         if workload.rate_per_s > 0:
             await clock.wait(rng.expovariate(workload.rate_per_s))
-        pending.append(
-            asyncio.create_task(runtime.run_task(f"task-{i}", agent, slo_s=workload.slo_s))
-        )
+        if workload.tool_hetero > 0:
+            scale = 1.0 + workload.tool_hetero if i % 2 == 0 else max(
+                0.1, 1.0 - workload.tool_hetero
+            )
+            specs = [
+                ToolSpec(
+                    spec.name,
+                    spec.executor,
+                    expected_duration_s=(spec.expected_duration_s or workload.tool_p50_s)
+                    * scale,
+                )
+                for spec in tools
+            ]
+
+            async def tuned(handle: Any, chosen: list[ToolSpec] = specs) -> None:
+                await agent(handle, chosen)
+
+            job = runtime.run_task(f"task-{i}", tuned, slo_s=workload.slo_s)
+        else:
+            job = runtime.run_task(f"task-{i}", agent, slo_s=workload.slo_s)
+        pending.append(asyncio.create_task(job))
     await asyncio.gather(*pending)
     await runtime.shutdown()
     clock.stop_driver()

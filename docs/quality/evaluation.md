@@ -83,6 +83,7 @@ peak KV 1883 MiB,goodput 0.0899,p99 70.6 s。
 | F5 | 低 | 死代码 3 处 | **已修** |
 | F6 | 低 | `scenarios` 用相对路径,依赖 CWD | **已修**(`workloads_root()` + 环境变量覆盖) |
 | F7 | 低 | `run_task` 宽泛 `except` 把编程错误也记成 FAILED,不可诊断 | **已修**(`run_error` 事件含 traceback;`strict_errors` 开关) |
+| F10 | 低 | `Scheduler.admit()` 从未被运行时调用(死协议,扩展点形同虚设) | **已修**:接入准入闸门(背压等待 + 超时),R6 的负结果也由此发现 |
 | F8 | 低 | `_sync_lease` 用 `clock.wait(0.05)` 轮询等待容量 | **开放**(仿真下可接受;真实时钟下应改事件通知) |
 | F9 | 低 | 仿真墙钟在 >12 agents 超线性 | **已修**:虚拟时钟改事件驱动,16 agents 5.17s→0.78s(6.6×),回放 15.4ms→2.7ms |
 

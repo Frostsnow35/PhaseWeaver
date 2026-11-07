@@ -96,10 +96,24 @@ class TurnsMixin:
         return stats
 
 
+    async def _wait_for_admission(self, unit: ExecutionUnit) -> None:
+        """R6: the scheduler's admit() is a real gate, not decoration.
+
+        A refused admission is backpressure (wait for a slot), not a failure: the
+        task only fails if the wait itself times out.
+        """
+        deadline = self.clock.now() + self.config.admission_wait_s
+        while not self.policy.admit(unit.unit_id, self.snapshot()):
+            if self.clock.now() >= deadline:
+                raise AdmissionRejected(f"admission denied for {unit.unit_id}")
+            await self.clock.wait(0.05)
+
     async def _activate(
         self, unit: ExecutionUnit, ctx: InferenceContext, prompt_tokens: int, reserve_tokens: int
     ) -> None:
         handle = self.ledger.handles.get(unit.unit_id)
+        if handle is None:
+            await self._wait_for_admission(unit)
         restored = None
         cap_tokens = self._max_tokens_for(unit)
         if cap_tokens is not None and reserve_tokens > cap_tokens:

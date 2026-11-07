@@ -57,6 +57,13 @@ def build_policy(name: str) -> Scheduler:
         return SystemScheduler(SchedulerConfig())
     if name == "B2a":
         return YieldOnToolPolicy()
+    if name == "B2c":
+        return SystemScheduler(SchedulerConfig(use_cost_model=True))
+    if name.startswith("align"):
+        from phaseweaver.alignment import AlignedPolicy
+
+        target = int(name.removeprefix("align") or "2")
+        return AlignedPolicy(target_streams=target)
     return _policy_from_plugin(name)
 
 

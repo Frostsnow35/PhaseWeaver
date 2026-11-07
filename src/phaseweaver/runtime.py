@@ -52,6 +52,8 @@ class RuntimeConfig:
     #: cleanup instead of being reported as a failed task. Turn it on in tests and
     #: during development; leave it off in production so one agent can't kill the tree.
     strict_errors: bool = False
+    #: How long a unit may wait for admission before the task fails.
+    admission_wait_s: float = 60.0
     #: Hard ceiling for one backend call. A real engine can stall (driver reset, OOM
     #: retry loop); without this the whole agent tree waits forever.
     backend_timeout_s: float = 300.0
