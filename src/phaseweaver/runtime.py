@@ -9,16 +9,19 @@ from pathlib import Path
 from typing import Any
 
 from phaseweaver.backends.base import InferenceBackend
+from phaseweaver.cleanup import CleanupMixin
 from phaseweaver.clock import Clock
 from phaseweaver.errors import AdmissionRejected, RuntimeClosed
+from phaseweaver.handoff import HandoffMixin
 from phaseweaver.invariant import InvariantChecker
 from phaseweaver.journal import EventJournal
 from phaseweaver.leases import Budget, LeaseBroker
 from phaseweaver.ledger import UnitLedger
 from phaseweaver.parking import ParkingMixin
 from phaseweaver.policy import ClusterSnapshot, Scheduler
-from phaseweaver.tools.base import ToolResult, ToolSpec, ToolStatus
+from phaseweaver.tools.base import ToolResult, ToolSpec
 from phaseweaver.tools.supervisor import ToolSupervisor
+from phaseweaver.turns import TurnsMixin
 from phaseweaver.types import (
     ContextState,
     ForkMode,
@@ -86,7 +89,7 @@ class AgentHandle:
         return await self._rt.fork(self.unit, label, fn, mode=mode, inherit_mode=inherit)
 
 
-class Runtime(ParkingMixin):
+class Runtime(ParkingMixin, HandoffMixin, CleanupMixin, TurnsMixin):
     def __init__(
         self,
         backend: InferenceBackend,
@@ -166,7 +169,7 @@ class Runtime(ParkingMixin):
                 self.registry.transition(unit.unit_id, Phase.FAILED, reason=type(exc).__name__)
             err = f"{type(exc).__name__}: {exc}"
         finally:
-            await self._release_unit(unit)
+            await self.release_unit(unit)
         self.checker.check()
         return TaskOutcome(
             unit_id=unit.unit_id,
@@ -203,86 +206,6 @@ class Runtime(ParkingMixin):
             prefill_tok_per_s=caps.prefill_tok_per_s,
             mem_bw_bps=caps.mem_bw_bps,
         )
-
-    async def reason(self, unit: ExecutionUnit, prompt_tokens: int, out_tokens: int) -> Any:
-        self._ensure_open()
-        if unit.phase is Phase.QUEUED:
-            self.registry.transition(unit.unit_id, Phase.REASONING)
-        ctx = unit.context
-        if ctx is None:
-            ctx = InferenceContext(context_id=f"ctx-{unit.unit_id.replace('/', '_')}")
-            unit.context = ctx
-        if ctx.state is not ContextState.ACTIVE:
-            await self._activate(unit, ctx, prompt_tokens, prompt_tokens + out_tokens)
-        handle = self.ledger.handles[unit.unit_id]
-        # A growing conversation: the engine keeps every token it has seen, so the
-        # reservation must cover the union of caller-supplied prompt and history.
-        tokens = max(prompt_tokens, ctx.resident_tokens) + out_tokens
-        await self._sync_lease(unit, ctx, self._lease_bytes(tokens))
-        # Count only units actually generating: units in REASONING may still be
-        # waiting for capacity, so phase alone would overstate device concurrency.
-        self.journal.append("engine_active", unit_id=unit.unit_id, payload={"delta": 1})
-        try:
-            stats = await asyncio.wait_for(
-                self.backend.complete(handle, out_tokens),
-                timeout=self.config.backend_timeout_s,
-            )
-        except TimeoutError as exc:
-            # A stalled engine must fail this unit, not hang the whole tree.
-            raise AdmissionRejected(
-                f"backend timed out after {self.config.backend_timeout_s}s"
-            ) from exc
-        finally:
-            self.journal.append("engine_active", unit_id=unit.unit_id, payload={"delta": -1})
-        self._set_context(unit, ctx, ContextState.ACTIVE, tokens)
-        return stats
-
-    async def _activate(
-        self, unit: ExecutionUnit, ctx: InferenceContext, prompt_tokens: int, reserve_tokens: int
-    ) -> None:
-        handle = self.ledger.handles.get(unit.unit_id)
-        restored = None
-        cap_tokens = self._max_tokens_for(unit)
-        if cap_tokens is not None and reserve_tokens > cap_tokens:
-            # K11: do not fail an oversized child - compact its context instead.
-            prompt_tokens = min(prompt_tokens, cap_tokens)
-            reserve_tokens = min(reserve_tokens, cap_tokens)
-            self.journal.append(
-                "context_compacted",
-                unit_id=unit.unit_id,
-                payload={"to_tokens": reserve_tokens, "reason": "scope_quota"},
-            )
-        want = self._lease_bytes(reserve_tokens)
-        unit.busy += 1
-        try:
-            # Lease first: the engine allocation must never outrun the budget.
-            await self._sync_lease(unit, ctx, want)
-            if handle is None:
-                handle = await self.backend.submit(
-                    unit.unit_id, ctx.context_id, prompt_tokens
-                )
-                self.ledger.handles[unit.unit_id] = handle
-            else:
-                self.journal.append("restore_started", unit_id=unit.unit_id)
-                restored = await self.backend.restore(handle)
-            self._set_context(
-                unit, ctx, ContextState.ACTIVE, handle.resident_tokens or prompt_tokens
-            )
-        finally:
-            unit.busy -= 1
-        if restored is not None:
-            unit.aggregate.recompute_tokens += restored.recompute_tokens
-            self.journal.append(
-                "restore_completed",
-                unit_id=unit.unit_id,
-                payload={
-                    "recompute_tokens": restored.recompute_tokens,
-                    "latency_ms": restored.latency_ms,
-                },
-            )
-            recorder = getattr(self.policy, "record_restore", None)
-            if recorder is not None:
-                recorder(unit.unit_id, self.clock.now())
 
     def _set_context(
         self,
@@ -323,79 +246,6 @@ class Runtime(ParkingMixin):
                 notifier(unit.unit_id, self.clock.now())
 
     # --- tools -------------------------------------------------------------
-    async def call_tool(
-        self, unit: ExecutionUnit, spec: ToolSpec, args: dict[str, Any]
-    ) -> ToolResult:
-        self._ensure_open()
-        if unit.phase is Phase.QUEUED:
-            self.registry.transition(unit.unit_id, Phase.REASONING)
-        ctx = unit.context
-        expected = spec.expected_duration_s or self.config.default_expected_tool_s
-        if ctx is not None and ctx.state is ContextState.ACTIVE:
-            disposition = self.policy.disposition_for(unit.unit_id, self.snapshot(), expected)
-            await self._park(unit, ctx, disposition)
-        if unit.phase is Phase.REASONING:
-            self.registry.transition(unit.unit_id, Phase.ACTING)
-        tool_unit = self.registry.create_tool_call(unit.unit_id, spec.name)
-        self.registry.transition(tool_unit.unit_id, Phase.ACTING)
-        try:
-            result = await self.supervisor.run(tool_unit.unit_id, spec, args)
-        except asyncio.CancelledError:
-            if not tool_unit.phase.is_terminal():
-                self.registry.transition(tool_unit.unit_id, Phase.CANCELLED)
-            raise
-        if not tool_unit.phase.is_terminal():
-            self.registry.transition(tool_unit.unit_id, Phase.COMPLETED)
-        if unit.phase is Phase.ACTING:
-            if result.status in (ToolStatus.OK, ToolStatus.ERROR):
-                self.registry.transition(unit.unit_id, Phase.REASONING)
-            else:  # timeout / killed / cancelled: the task fails, no faking success
-                self.registry.transition(unit.unit_id, Phase.FAILED)
-        return result
-
-    # --- dispositions ------------------------------------------------------
-    async def _release_unit(self, unit: ExecutionUnit) -> None:
-        # Bookkeeping first, engine call last: the invariant checker must never
-        # observe a terminal unit that still holds a lease (I4) or a lease without
-        # residency (I2) while we await the backend.
-        #
-        # Recurse into descendants: a child left mid-flight by a failed parent
-        # would otherwise leak its lease forever (I5).
-        targets = [self.registry.get(uid) for uid in self.registry.descendants(unit.unit_id)]
-        for target in reversed(targets + [unit]):
-            await self._release_one(target)
-
-    async def _release_one(self, unit: ExecutionUnit) -> None:
-        unit.busy += 1
-        try:
-            if not unit.phase.is_terminal():
-                self.registry.transition(unit.unit_id, Phase.CANCELLED, reason="parent_released")
-            self.ledger.leases.pop(unit.unit_id, None)
-            ctx_id = unit.context.context_id if unit.context is not None else None
-            for lease in self.broker.active_leases():
-                if lease.unit_id == unit.unit_id or (
-                    ctx_id is not None and lease.context_id == ctx_id
-                ):
-                    self.broker.release(lease.lease_id, reason="unit_end")
-            if unit.context is not None and unit.context.state is not ContextState.RELEASED:
-                self._set_context(unit, unit.context, ContextState.RELEASED)
-            handle = self.ledger.handles.pop(unit.unit_id, None)
-            if handle is not None:
-                # Bookkeeping above is already consistent; shield the engine call so
-                # a cancellation can't leave the allocation half-released.
-                try:
-                    await asyncio.shield(self.backend.abort(handle, "unit_end"))
-                except asyncio.CancelledError:
-                    raise
-        finally:
-            unit.busy -= 1
-
-    async def cancel(self, unit: ExecutionUnit, reason: str = "cancelled") -> None:
-        if not unit.phase.is_terminal():
-            await self.registry.cancel(unit.unit_id, reason=reason)
-        await self._release_unit(unit)
-
-    # --- subagents ---------------------------------------------------------
     async def fork(
         self,
         parent: ExecutionUnit,
@@ -451,33 +301,7 @@ class Runtime(ParkingMixin):
             and parent_ctx.state in (ContextState.ACTIVE, ContextState.RETAINED)
         )
         if can_inherit and (depth == 0 or relay):
-            assert parent_ctx is not None  # narrowed by can_inherit
-            parent_handle = self.ledger.handles.get(parent_id)
-            lease = self.ledger.leases.get(parent_id)
-            if parent_handle is not None and lease is not None:
-                child_ctx_id = f"ctx-{child.unit_id.replace('/', '_')}"
-                tokens = parent_ctx.resident_tokens
-                # Engine first (the only await), then everything else synchronously:
-                # the lease travels with the blocks, so no invariant can observe a
-                # unit that owns residency without holding a lease.
-                moved = await self.backend.handoff(parent_handle, child.unit_id, child_ctx_id)
-                if self.broker.transfer(
-                    lease.lease_id, child.unit_id, child_ctx_id, self._lease_bytes(tokens)
-                ):
-                    self.ledger.handles.pop(parent_id, None)
-                    self.ledger.handles[child.unit_id] = moved
-                    self.ledger.leases.pop(parent_id, None)
-                    self.ledger.leases[child.unit_id] = lease
-                    child.context = InferenceContext(
-                        context_id=child_ctx_id, resident_tokens=tokens
-                    )
-                    child.adopted_from = parent_id
-                    self._set_context(parent, parent_ctx, ContextState.HANDED_OFF)
-                    parent_ctx.handed_off_to = child.unit_id
-                else:
-                    # Cannot move the lease (budget/scope): give the blocks back and
-                    # let the child re-prefill. Never leave blocks unleased.
-                    await self.backend.handoff(moved, parent_id, parent_ctx.context_id)
+            await self.handoff_to_child(parent, parent_ctx, child)
         started = self.clock.now()
         try:
             if depth == 0:
@@ -505,42 +329,9 @@ class Runtime(ParkingMixin):
                     self.registry.transition(
                         child.unit_id, Phase.FAILED if error else Phase.COMPLETED
                     )
-                # Hand the KV back before releasing: on join the parent resumes from
-                # the child's context with zero recompute. Blocks and lease move in
-                # one synchronous step after the engine call.
-                child_handle = self.ledger.handles.get(child.unit_id)
-                child_lease = self.ledger.leases.get(child.unit_id)
-                if (
-                    can_inherit_mode
-                    and child.adopted_from is not None
-                    and child_handle is not None
-                    and child_lease is not None
-                    and child.context is not None
-                    and parent_ctx is not None
-                    and parent_ctx.state is ContextState.HANDED_OFF
-                ):
-                    given_back = await self.backend.handoff(
-                        child_handle, parent_id, parent_ctx.context_id
-                    )
-                    tokens = child_handle.resident_tokens
-                    if self.broker.transfer(
-                        child_lease.lease_id,
-                        parent_id,
-                        parent_ctx.context_id,
-                        self._lease_bytes(tokens),
-                    ):
-                        self.ledger.handles.pop(child.unit_id, None)
-                        self.ledger.leases.pop(child.unit_id, None)
-                        self.ledger.leases[parent_id] = child_lease
-                        self._set_context(child, child.context, ContextState.HANDED_OFF)
-                        self._set_context(parent, parent_ctx, ContextState.RETAINED)
-                        parent_ctx.handed_off_to = None
-                    else:
-                        # Give the blocks back so they remain covered by a lease.
-                        await self.backend.handoff(
-                            given_back, child.unit_id, child.context.context_id
-                        )
-                await self._release_unit(child)
+                if can_inherit_mode:
+                    await self.handoff_from_child(parent, parent_ctx, child)
+                await self.release_unit(child)
                 self.registry.join(child.unit_id)
         finally:
             self._fork_depth[parent_id] -= 1
