@@ -86,7 +86,15 @@ class InferenceBackend(Protocol):
 
     def available_bytes(self) -> int: ...
 
-    async def submit(self, unit_id: str, context_id: str, tokens: int) -> Handle: ...
+    async def submit(
+        self,
+        unit_id: str,
+        context_id: str,
+        tokens: int,
+        *,
+        shared_tokens: int = 0,
+        prefix_key: str | None = None,
+    ) -> Handle: ...
 
     async def complete(self, handle: Handle, out_tokens: int) -> GenStats: ...
 

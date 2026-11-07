@@ -70,9 +70,14 @@ class AgentHandle:
         return await self._rt.call_tool(self.unit, spec, args)
 
     async def fork(
-        self, label: str, fn: AgentFn, *, mode: ForkMode = ForkMode.SHARE
+        self,
+        label: str,
+        fn: AgentFn,
+        *,
+        mode: ForkMode = ForkMode.SHARE,
+        inherit_prefix: bool = False,
     ) -> TaskOutcome:
-        return await self._rt.fork(self.unit, label, fn, mode=mode)
+        return await self._rt.fork(self.unit, label, fn, mode=mode, inherit_prefix=inherit_prefix)
 
 
 class Runtime:
@@ -221,12 +226,19 @@ class Runtime:
                 payload={"to_tokens": reserve_tokens, "reason": "scope_quota"},
             )
         want = self._lease_bytes(reserve_tokens)
+        shared_tokens = ctx.shared_tokens if ctx.prefix_key is not None else 0
         unit.busy += 1
         try:
             # Lease first: the engine allocation must never outrun the budget.
             await self._sync_lease(unit, ctx, want)
             if handle is None:
-                handle = await self.backend.submit(unit.unit_id, ctx.context_id, prompt_tokens)
+                handle = await self.backend.submit(
+                    unit.unit_id,
+                    ctx.context_id,
+                    prompt_tokens,
+                    shared_tokens=shared_tokens,
+                    prefix_key=ctx.prefix_key,
+                )
                 self._handles[unit.unit_id] = handle
             else:
                 self.journal.append("restore_started", unit_id=unit.unit_id)
@@ -435,6 +447,13 @@ class Runtime:
         deadline = self.clock.now() + wait_s
         while True:
             if current is None:
+                # Every unit's residency owns a prefix group keyed by its own id, so
+                # a child can reference it later. A child references its parent's
+                # group and pays only for the delta (KV fork).
+                prefix = ctx.prefix_key or unit.unit_id
+                shared = (
+                    self._lease_bytes(ctx.shared_tokens) if ctx.prefix_key is not None else 0
+                )
                 lease = self.broker.acquire(
                     unit.unit_id,
                     ctx.context_id,
@@ -442,6 +461,8 @@ class Runtime:
                     want,
                     unit.priority,
                     scope=unit.scope,
+                    prefix_key=prefix,
+                    shared_bytes=shared,
                 )
                 if lease is not None:
                     self._leases[unit.unit_id] = lease
@@ -501,6 +522,7 @@ class Runtime:
         fn: AgentFn,
         *,
         mode: ForkMode = ForkMode.SHARE,
+        inherit_prefix: bool = False,
     ) -> TaskOutcome:
         """Run a child to completion while the parent waits.
 
@@ -529,6 +551,16 @@ class Runtime:
         # both try to park the same parent context.
         self._fork_depth[parent_id] = depth + 1
         child = self.registry.fork(parent_id, label, mode=mode, scope=scope_id)
+        # KV fork: the child references the parent's resident prefix instead of
+        # re-prefilling it. This only works because units are a *tree* - it is the
+        # reason the runtime models subagents as units rather than loose requests.
+        parent_ctx = parent.context
+        if inherit_prefix and parent_ctx is not None and parent_ctx.resident_tokens > 0:
+            child.context = InferenceContext(
+                context_id=f"ctx-{child.unit_id.replace('/', '_')}",
+                prefix_key=parent_id,
+                shared_tokens=parent_ctx.resident_tokens,
+            )
         started = self.clock.now()
         try:
             if depth == 0:
@@ -542,25 +574,22 @@ class Runtime:
                 if parent.phase is Phase.REASONING:
                     self.registry.transition(parent_id, Phase.WAITING)
             self.registry.transition(child.unit_id, Phase.QUEUED)
+            error: str | None = None
             try:
                 await fn(AgentHandle(self, child))
             except AdmissionRejected as exc:
                 # A child that cannot fit its own quota is contained here: the
                 # parent keeps running and the siblings keep their capacity.
+                error = f"{type(exc).__name__}: {exc}"
+            finally:
+                # Always release and join, whatever path the child took: a child
+                # left mid-flight would leak its lease (I4) forever.
                 if not child.phase.is_terminal():
-                    self.registry.transition(child.unit_id, Phase.FAILED, reason="quota")
+                    self.registry.transition(
+                        child.unit_id, Phase.FAILED if error else Phase.COMPLETED
+                    )
                 await self._release_unit(child)
                 self.registry.join(child.unit_id)
-                return TaskOutcome(
-                    unit_id=child.unit_id,
-                    phase=child.phase.value,
-                    latency_ms=(self.clock.now() - started) * 1000,
-                    error=f"{type(exc).__name__}: {exc}",
-                )
-            if not child.phase.is_terminal():
-                self.registry.transition(child.unit_id, Phase.COMPLETED)
-            await self._release_unit(child)
-            self.registry.join(child.unit_id)
         finally:
             self._fork_depth[parent_id] -= 1
             if scope_id is not None:

@@ -1,0 +1,22 @@
+[workload]
+name = "w7-kvfork-noshare"
+# 对照组:同样的负载,但子 Agent 不继承前缀(必须自己重新 prefill)。
+agents = 6
+rounds = 2
+context_tokens = 4096
+out_tokens = 128
+slo_s = 240.0
+seed = 3
+fanout = 3
+sub_rounds = 2
+sub_context_tokens = 2048
+inherit_prefix = false
+
+[tool]
+kind = "python"
+p50_s = 3.0
+sigma = 0.5
+
+[arrival]
+kind = "poisson"
+rate_per_s = 0.35

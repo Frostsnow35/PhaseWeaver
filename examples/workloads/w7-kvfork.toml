@@ -1,0 +1,22 @@
+[workload]
+name = "w7-kvfork"
+# KV 继承:子 Agent 以父上下文为前缀,只为自己新增的 delta 付显存。
+agents = 6
+rounds = 2
+context_tokens = 4096
+out_tokens = 128
+slo_s = 240.0
+seed = 3
+fanout = 3
+sub_rounds = 2
+sub_context_tokens = 2048
+inherit_prefix = true
+
+[tool]
+kind = "python"
+p50_s = 3.0
+sigma = 0.5
+
+[arrival]
+kind = "poisson"
+rate_per_s = 0.35

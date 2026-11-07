@@ -78,7 +78,17 @@ class OpenAICompatBackend:
         used = sum(r.tokens for r in self._resident.values() if not r.dropped)
         return self._caps.capacity_bytes - used * self._caps.bytes_per_token
 
-    async def submit(self, unit_id: str, context_id: str, tokens: int) -> Handle:
+    async def submit(
+        self,
+        unit_id: str,
+        context_id: str,
+        tokens: int,
+        *,
+        shared_tokens: int = 0,
+        prefix_key: str | None = None,
+    ) -> Handle:
+        # The server side may still benefit from prefix caching, but over the
+        # OpenAI API we cannot observe or reserve that; we only track the lease.
         self._resident[context_id] = _Resident(tokens=tokens)
         return Handle(unit_id=unit_id, context_id=context_id, resident_tokens=tokens)
 

@@ -45,6 +45,7 @@ class Workload:
     fork_mode: str = "share"
     sub_context_tokens: int = 0
     greedy_factor: float = 1.0
+    inherit_prefix: bool = False
 
     @classmethod
     def load(cls, path: Path) -> Workload:
@@ -66,6 +67,7 @@ class Workload:
             fork_mode=str(w.get("fork_mode", "share")),
             sub_context_tokens=int(w.get("sub_context_tokens", 0)),
             greedy_factor=float(w.get("greedy_factor", 1.0)),
+            inherit_prefix=bool(w.get("inherit_prefix", False)),
         )
 
 
@@ -128,7 +130,10 @@ async def run_one(
 
     async def child(handle: Any, greedy: bool = False) -> None:
         base = workload.sub_context_tokens or workload.context_tokens // 2
-        prompt = int(base * (workload.greedy_factor if greedy else 1.0))
+        base = int(base * (workload.greedy_factor if greedy else 1.0))
+        # Same conversation length in both arms; only the sharing differs, otherwise
+        # the comparison would just measure a smaller prompt.
+        prompt = workload.context_tokens + base
         for _ in range(workload.sub_rounds):
             await handle.reason(prompt_tokens=prompt, out_tokens=workload.out_tokens)
             await handle.call_tool(
@@ -149,7 +154,12 @@ async def run_one(
             mode = ForkMode.ISOLATE if workload.fork_mode == "isolate" else ForkMode.SHARE
             await asyncio.gather(
                 *(
-                    handle.fork(f"sub-{i}", lambda h, g=(i == 0): child(h, g), mode=mode)
+                    handle.fork(
+                        f"sub-{i}",
+                        lambda h, g=(i == 0): child(h, g),
+                        mode=mode,
+                        inherit_prefix=workload.inherit_prefix,
+                    )
                     for i in range(workload.fanout)
                 )
             )
