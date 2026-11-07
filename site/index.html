@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="description" content="PhaseWeaver: an agent execution runtime that turns tool phases into programmable KV-cache decisions. Architecture, handoff mechanism and simulation results." />
 <title>PhaseWeaver — Agent Execution Runtime</title>
 <style>
   :root{
@@ -61,9 +62,59 @@
   footer{border-top:2px solid var(--ink);margin-top:36px;padding:18px 0 48px;font-size:14px;color:var(--muted);display:flex;flex-wrap:wrap;gap:8px 24px;max-width:1024px;margin-left:auto;margin-right:auto;padding-left:36px;padding-right:36px}
   footer .sep{flex:1}
   footer a{color:var(--accent);text-decoration:none;border-bottom:1px solid rgba(140,47,31,.35)}
+
+  /* motion: only where it explains the mechanism; paused off-screen */
+  .skip{position:absolute;left:-9999px;top:0;background:var(--paper);padding:10px 14px;border:1px solid var(--ink);font-size:14px}
+  .skip:focus{left:12px;top:12px;z-index:10}
+  a:focus-visible,button:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+  h2:target{color:var(--accent)}
+
+  @keyframes kv-travel{
+    0%,10%{transform:translateX(0)}
+    25%,60%{transform:translateX(340px)}
+    80%,100%{transform:translateX(0)}
+  }
+  @keyframes kv-glow{0%,10%{opacity:.18} 30%,100%{opacity:0}}
+  @keyframes kv-glow-mid{0%,20%{opacity:0} 28%,58%{opacity:.2} 70%,100%{opacity:0}}
+  @keyframes kv-glow-back{0%,76%{opacity:0} 84%,94%{opacity:.18} 100%{opacity:0}}
+  @keyframes sweep-x{0%{transform:translateX(0)} 100%{transform:translateX(936px)}}
+  @keyframes step-hit{0%{opacity:0} 2%{opacity:.22} 13%{opacity:.22} 16%,100%{opacity:0}}
+  @keyframes opt-hit{0%{opacity:0} 6%{opacity:.2} 20%{opacity:.2} 26%,100%{opacity:0}}
+
+
+  figure.live svg .hl{opacity:0}
+  figure.live svg .step-hit{opacity:0}
+  figure.live svg .opt-hit{opacity:0}
+  figure.live svg .kv-chip{animation:kv-travel 7s ease-in-out infinite}
+  figure.live svg .hl-parent{animation:kv-glow 7s ease-in-out infinite}
+  figure.live svg .hl-child{animation:kv-glow-mid 7s ease-in-out infinite}
+  figure.live svg .hl-back{animation:kv-glow-back 7s ease-in-out infinite}
+  figure.live svg .sweep{animation:sweep-x 9s linear infinite}
+  figure.live svg .step-hit{animation:step-hit 9s linear infinite;animation-delay:var(--d,0s)}
+  figure.live svg .opt-hit{animation:opt-hit 5.4s ease-in-out infinite;animation-delay:var(--d,0s)}
+  figure.live svg .kv-chip,
+  figure.live svg .hl,
+  figure.live svg .sweep,
+  figure.live svg .step-hit,
+  figure.live svg .opt-hit{animation-play-state:paused}
+  figure.live.is-playing svg .kv-chip,
+  figure.live.is-playing svg .hl,
+  figure.live.is-playing svg .sweep,
+  figure.live.is-playing svg .step-hit,
+  figure.live.is-playing svg .opt-hit{animation-play-state:running}
+
+  @media (prefers-reduced-motion: reduce){
+    *{animation:none !important;transition:none !important;scroll-behavior:auto !important}
+  }
+  @media print{
+    .skip{display:none}
+    figure{break-inside:avoid}
+    body{background:#fff}
+  }
 </style>
 </head>
 <body>
+<a class="skip" href="#problem">Skip to content</a>
 <div class="page">
 
   <header class="masthead">
@@ -202,7 +253,7 @@
     <h2 id="turn"><span class="n">3</span>One turn: who decides, and when</h2>
     <p class="secnote">Reasoning alternates with tool calls; the memory decision happens at the phase boundary.</p>
 
-    <figure>
+    <figure class="live">
       <div class="frame">
         <svg viewBox="0 0 960 300" role="img" aria-label="Flow of one agent turn with the resource action at each stage">
           <g font-size="14.5" fill="#191a1c">
@@ -218,6 +269,15 @@
             <line x1="354" y1="60" x2="390" y2="60"/><path d="M390 60 l-8 -4 v8 z" fill="#191a1c"/>
             <line x1="548" y1="60" x2="584" y2="60"/><path d="M584 60 l-8 -4 v8 z" fill="#191a1c"/>
             <line x1="742" y1="60" x2="778" y2="60"/><path d="M778 60 l-8 -4 v8 z" fill="#191a1c"/>
+          </g>
+          <g font-family="Consolas,monospace" font-size="12" fill="#8c2f1f">
+            </g>
+          <g aria-hidden="true">
+            <rect x="10"  y="34" width="150" height="52" fill="#8c2f1f" class="step-hit" style="--d:0s"/>
+            <rect x="204" y="34" width="150" height="52" fill="#8c2f1f" class="step-hit" style="--d:1.8s"/>
+            <rect x="398" y="34" width="150" height="52" fill="#8c2f1f" class="step-hit" style="--d:3.7s"/>
+            <rect x="592" y="34" width="150" height="52" fill="#8c2f1f" class="step-hit" style="--d:5.5s"/>
+            <rect x="786" y="34" width="160" height="52" fill="#8c2f1f" class="step-hit" style="--d:7.4s"/>
           </g>
           <g font-family="Consolas,monospace" font-size="12" fill="#8c2f1f">
             <text x="178" y="28" text-anchor="middle">admit</text>
@@ -246,6 +306,7 @@
           <rect x="10" y="184" width="936" height="16" fill="#f2efe7" stroke="#dad6cc"/>
           <rect x="204" y="184" width="150" height="16" fill="#8c2f1f"/>
           <rect x="592" y="184" width="150" height="16" fill="#8c2f1f"/>
+          <line class="sweep" x1="10" y1="26" x2="10" y2="250" stroke="#8c2f1f" stroke-width="1.2" opacity=".35" aria-hidden="true"/>
           <text x="473" y="196" text-anchor="middle" font-family="Consolas,monospace" font-size="12.5" fill="#8b8f96">idle</text>
           <text x="900" y="196" text-anchor="middle" font-family="Consolas,monospace" font-size="12.5" fill="#8b8f96">idle</text>
 
@@ -256,13 +317,13 @@
           </g>
         </svg>
       </div>
-      <figcaption><b>Fig. 3.</b> Beige boxes are phases; grey text below each is the resource action. The decision is made when the tool starts, not when the engine eventually evicts under LRU.</figcaption>
+      <figcaption><b>Fig. 3.</b> Beige boxes are phases; grey text below each is the resource action. The moving line steps through the turn in order; the decision is made when the tool starts, not when the engine eventually evicts under LRU.</figcaption>
     </figure>
 
     <h2 id="states"><span class="n">4</span>States and invariants: no residency without a lease</h2>
     <p class="secnote">Phase and KV ownership are orthogonal; seven invariants are checked after every transition.</p>
 
-    <figure>
+    <figure class="live">
       <div class="frame">
         <svg viewBox="0 0 960 480" role="img" aria-label="Context state machine: ACTIVE parks into retained, offloaded or dropped, and restores back">
           <rect x="60" y="24" width="150" height="50" fill="#f2efe7" stroke="#191a1c"/>
@@ -325,18 +386,23 @@
             <line x1="620" y1="330" x2="648" y2="330" stroke="#8b8f96" stroke-width="1" stroke-dasharray="4 3"/>
             <text x="656" y="335">dashed: back to ACTIVE</text>
           </g>
+          <g aria-hidden="true">
+            <rect x="310" y="90"  width="200" height="54" fill="#8c2f1f" class="opt-hit" style="--d:0s"/>
+            <rect x="310" y="230" width="200" height="54" fill="#8c2f1f" class="opt-hit" style="--d:1.8s"/>
+            <rect x="310" y="370" width="200" height="54" fill="#8c2f1f" class="opt-hit" style="--d:3.6s"/>
+          </g>
           <text x="60" y="460" font-size="13.5" fill="#8b8f96">Any non-terminal state can reach RELEASED via RELEASE (arrows omitted for clarity); a terminal unit must hold no lease.</text>
         </svg>
       </div>
-      <figcaption><b>Fig. 4.</b> Seven KV-ownership states. Red is the parent/child transfer path: ownership is unique during the transfer, and it rolls back if the lease cannot follow.</figcaption>
+      <figcaption><b>Fig. 4.</b> Seven KV-ownership states. The three disposition paths highlight in turn; red is the parent/child transfer path, where ownership is unique and rolls back if the lease cannot follow.</figcaption>
     </figure>
 
     <h2 id="handoff"><span class="n">5</span>KV handoff: the child continues from the parent</h2>
     <p class="secnote">By default a child re-prefills the whole context; handoff turns that cost into zero.</p>
 
-    <figure>
+    <figure class="live">
       <div class="frame">
-        <svg viewBox="0 0 960 156" role="img" aria-label="KV ownership handoff: parent holds, child holds, returns to parent after join">
+        <svg viewBox="0 0 960 190" role="img" aria-label="KV ownership handoff: parent holds, child holds, returns to parent after join">
           <g font-size="15" fill="#191a1c">
             <rect x="30"  y="46" width="220" height="58" fill="#f2efe7" stroke="#191a1c"/>
             <text x="46" y="70">parent unit</text>
@@ -360,9 +426,18 @@
           <path d="M702 75 l-9 -4 v8 z" fill="#191a1c"/>
           <text x="646" y="60" text-anchor="middle" font-size="13.5" fill="#5c6067">② join returns it</text>
           <text x="646" y="100" text-anchor="middle" font-size="13" fill="#5c6067">zero recompute</text>
+          <g aria-hidden="true">
+            <rect x="30"  y="46" width="220" height="58" fill="#8c2f1f" class="hl hl-parent"/>
+            <rect x="370" y="46" width="220" height="58" fill="#8c2f1f" class="hl hl-child"/>
+            <rect x="710" y="46" width="220" height="58" fill="#8c2f1f" class="hl hl-back"/>
+          </g>
+          <g class="kv-chip" aria-hidden="true">
+            <rect x="70" y="126" width="140" height="26" fill="#fcfbf8" stroke="#8c2f1f"/>
+            <text x="140" y="144" text-anchor="middle" font-family="Consolas,monospace" font-size="12" fill="#8c2f1f">KV blocks + lease</text>
+          </g>
         </svg>
       </div>
-      <figcaption><b>Fig. 5.</b> After the engine call returns, lease, handle and state move together. If the lease cannot follow, the blocks go back and the child falls back to prefill.</figcaption>
+      <figcaption><b>Fig. 5.</b> After the engine call returns, lease, handle and state move together; the loop shows the round trip. If the lease cannot follow, the blocks go back and the child falls back to prefill. Motion respects reduced-motion settings.</figcaption>
     </figure>
 
     <h2 id="evidence"><span class="n">6</span>Results: handoff pays off by an order of magnitude on structured work</h2>
@@ -467,5 +542,18 @@ python -m phaseweaver.demo scenarios --seeds 3      <span># scenario matrix</spa
   </footer>
 
 </div>
+<script>
+  (function(){
+    var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)');
+    if (reduce && reduce.matches) return;
+    if (!('IntersectionObserver' in window)) return;
+    var io = new IntersectionObserver(function(entries){
+      entries.forEach(function(entry){
+        entry.target.classList.toggle('is-playing', entry.isIntersecting);
+      });
+    }, {threshold: 0.25});
+    document.querySelectorAll('figure.live').forEach(function(fig){ io.observe(fig); });
+  })();
+</script>
 </body>
 </html>
