@@ -6,6 +6,10 @@
 
 ### Added
 
+- **K6**:`oracle.py` 重写为与 α 吞吐模型一致的有效下界(设备级 + 单任务关键路径取大),
+  `demo optimal` 输出 `bound_kind=alpha_lower_bound`。
+- **K12**:KV 交接(handoff)——fork 时父单元把 KV 所有权移交子单元,join 时交回,零重算;
+  `inherit_mode = none | handoff`。
 - **M5**:`OpenAICompatBackend`(stdlib HTTP)与 `VLLMBackend`(可选引擎级 sleep/wake),
   实现与 mock 相同的 `InferenceBackend` 协议;能力协商会把 `OFFLOAD` 自动降级为 `DROP`。
 - 文档:新增 `docs/notes/devlog.md`(开发日志,记录取舍、缺陷与作废范围)。

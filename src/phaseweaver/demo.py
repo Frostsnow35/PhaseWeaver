@@ -269,24 +269,31 @@ def cmd_sweep(args: argparse.Namespace) -> int:
 
 
 def cmd_optimal(args: argparse.Namespace) -> int:
-    from phaseweaver.oracle import OracleBudget, brute_force_min_makespan
+    from phaseweaver.oracle import AlphaModel, lower_bound_makespan
 
     workload = Workload.load(Path(args.workload))
     report = asyncio.run(run_one(workload, args.policy, capacity_gib=args.capacity_gib))
-    reasoning_s = workload.context_tokens / 3200 + workload.out_tokens / 45
-    bound_s = brute_force_min_makespan(
-        tasks=[workload.rounds] * workload.agents,
-        reasoning_s=[reasoning_s] * workload.agents,
-        tool_s=[workload.tool_p50_s] * workload.agents,
-        budget=OracleBudget(
-            max_resident=max(1, int(args.capacity_gib * 1024**3 / (2048 * BYTES_PER_TOKEN)))
-        ),
+    c = caps(args.capacity_gib)
+    model = AlphaModel(
+        prefill_tok_per_s=c.prefill_tok_per_s,
+        decode_tok_per_s=c.decode_tok_per_s,
+        alpha=c.contention_alpha,
+        capacity_bytes=int(c.capacity_bytes * 0.95),  # same headroom as the run
+        bytes_per_token=c.bytes_per_token,
+    )
+    bound_s = lower_bound_makespan(
+        agents=workload.agents,
+        rounds=workload.rounds,
+        prefill_tokens=workload.context_tokens + workload.out_tokens,
+        decode_tokens=workload.out_tokens,
+        tool_s=workload.tool_p50_s,
+        model=model,
     )
     observed = report.wall_clock_s
     gap = (observed - bound_s) / bound_s * 100 if bound_s else 0.0
     print(
         f"[L2] optimality policy={args.policy} observed={observed:.1f}s "
-        f"bound={bound_s:.1f}s gap={gap:.1f}% bound_kind=heuristic_lower_bound"
+        f"bound={bound_s:.1f}s gap={gap:.1f}% bound_kind=alpha_lower_bound"
     )
     return 0
 

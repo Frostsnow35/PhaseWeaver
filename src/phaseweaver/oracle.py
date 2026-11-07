@@ -1,14 +1,20 @@
-"""B4: offline lower bound on makespan. Experiment-only; never imported by runtime.
+"""B4: offline lower bound on makespan, consistent with the simulator's α model.
 
-Bound used: for each task i with n_i rounds of (reasoning r_i, tool t_i),
+The mock shares one device across concurrent streams: a stream alone runs at
+`base`, and with n streams each runs at `base / (1 + α(n-1))`. Aggregate
+throughput is therefore `n * base / (1 + α(n-1))`, bounded by `base / α`.
 
-    LB = max( sum_i n_i*r_i ,  max_i n_i*(r_i + t_i) )
+A bound must be *optimistic* to be valid, so we use the most favourable
+concurrency the capacity allows: `k = capacity / smallest_context`, capped by the
+number of tasks. Two independent limits are combined:
 
-The first term is the serial GPU work (reasoning never overlaps itself on one
-device); the second is the longest single-task critical path. The bound ignores
-capacity contention, so it is a *lower* bound and the reported optimality gap
-is an upper bound on the true gap. Always report
-`bound_kind=heuristic_lower_bound`.
+    LB_device = max(total_prefill / A_prefill(k), total_decode / A_decode(k))
+    LB_path   = max_i rounds_i * (prefill_i + decode_i + tool_i)
+    LB        = max(LB_device, LB_path)
+
+`LB_path` is the longest single-task critical path; `LB_device` is the best case
+where the device is saturated the whole time. Both ignore admission and queueing,
+so the reported gap is an **upper bound on the true optimality gap**.
 """
 
 from __future__ import annotations
@@ -17,25 +23,49 @@ from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
-class OracleBudget:
-    max_resident: int
-    max_nodes: int = 200_000
+class AlphaModel:
+    prefill_tok_per_s: int = 3200
+    decode_tok_per_s: int = 45
+    alpha: float = 0.15
+    capacity_bytes: int = 8 * 1024**3
+    bytes_per_token: int = 57344
+
+    def aggregate(self, n: int, base: float) -> float:
+        n = max(1, n)
+        return n * base / (1.0 + self.alpha * (n - 1))
+
+    def max_streams(self, min_context_tokens: int, tasks: int) -> int:
+        if min_context_tokens <= 0:
+            return max(1, tasks)
+        per_task = min_context_tokens * self.bytes_per_token
+        if per_task <= 0:
+            return max(1, tasks)
+        return max(1, min(tasks, self.capacity_bytes // per_task))
 
 
 def lower_bound_makespan(
-    tasks: list[int],
-    reasoning_s: list[float],
-    tool_s: list[float],
-    budget: OracleBudget,
+    *,
+    agents: int,
+    rounds: int,
+    prefill_tokens: int,
+    decode_tokens: int,
+    tool_s: float,
+    model: AlphaModel,
 ) -> float:
-    if not tasks:
+    """Lower bound on wall-clock seconds for the whole workload."""
+    if agents <= 0 or rounds <= 0:
         return 0.0
-    total_reasoning = sum(n * r for n, r in zip(tasks, reasoning_s, strict=True))
-    longest_task = max(
-        n * (r + t) for n, r, t in zip(tasks, reasoning_s, tool_s, strict=True)
+    total_prefill = agents * rounds * prefill_tokens
+    total_decode = agents * rounds * decode_tokens
+
+    k = model.max_streams(prefill_tokens, agents)
+    agg_prefill = model.aggregate(k, model.prefill_tok_per_s)
+    agg_decode = model.aggregate(k, model.decode_tok_per_s)
+
+    device = max(total_prefill / agg_prefill, total_decode / agg_decode)
+    path = rounds * (
+        prefill_tokens / model.prefill_tok_per_s
+        + decode_tokens / model.decode_tok_per_s
+        + max(0.0, tool_s)
     )
-    return max(total_reasoning, longest_task)
-
-
-# Backwards-compatible alias used by the plan document.
-brute_force_min_makespan = lower_bound_makespan
+    return max(device, path)
