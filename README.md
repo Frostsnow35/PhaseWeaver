@@ -15,7 +15,7 @@ KV Cache 仍占着显存,其他 Agent 只能排队。PhaseWeaver 把这个切换
 > 它不是编排框架。契约只有一条:推理与工具调用经过 `unit.reason()` / `unit.call_tool()`,
 > 让运行时看见阶段切换。详见 [它是什么](docs/guide/what-is-it.md)。
 
-**Live demo**: <https://frostsnow35.github.io/PhaseWeaver/> · 单文件、无外部依赖、可离线打开
+**Live demo**: <https://frostsnow35.github.io/PhaseWeaver/>
 
 ## 五分钟开始
 
@@ -59,11 +59,11 @@ python -m phaseweaver.demo scenarios --capacity-gib 2 --seeds 3
 
 ## 核心机制
 
-- **双状态机**:`Phase`(执行阶段)与 `ContextState`(KV 归属)正交,7 条不变量可断言。
+- **双状态机**:`Phase`(执行阶段)与 `ContextState`(KV 归属)正交。
 - **处置权租约**:`RETAIN / OFFLOAD / DROP / RELEASE` + 引擎能力协商 + 显式降级。
 - **KV 交接**:fork 时把 KV 所有权交给子单元,join 交回——零拷贝、零重算。
 - **可证下界**:按占空比推导的 makespan 下界,用来判断调度器离结构上限有多远。
-- **事件日志即事实**:所有指标由日志重放,不维护并行计数器。
+- **事件日志记录**:日志整理记录各指标,不维护并行计数器。
 
 ## 接入真实引擎
 
@@ -105,7 +105,7 @@ uv run mypy --platform linux src/phaseweaver
 ## 状态与边界
 
 - 核心机制与实验均在 mock 仿真上完成([L1]/[L2]),**尚未在真实 GPU 上验证**([L3],issue #3)。
-- 本仓库的仿真数字不得表述为真实引擎性能。
+- 本仓库的性能数据依然为仿真数字验证的结果。
 - 实验记录:[docs/notes/experiments.md](docs/notes/experiments.md)
 
 ## 本机环境注意事项(sandbox)
