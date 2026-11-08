@@ -87,10 +87,22 @@ uv run mypy src/phaseweaver
 uv run mypy --platform linux src/phaseweaver
 ```
 
+工程约定见 [CONTRIBUTING.md](CONTRIBUTING.md),PR 规范见 [AGENTS.md](AGENTS.md);实验、开发与取舍记录只保留在本地(`_local/`,不入库),仓库只保留可复现脚本与契约文档。
+
+### Demo 站点
+
+静态页在 [`site/index.html`](site/index.html),由 GitHub Actions 发布到 GitHub Pages:
+
+- 工作流:`.github/workflows/pages.yml`(构建 `site/` 制品 → `deploy-pages`)
+- 仓库 Settings → Pages → **Source: GitHub Actions**(只需设置一次)
+- 本地预览:`python -m http.server 8000 -d site`,或直接打开该文件
+- 单文件、无外部请求、可离线打开;动效在 `prefers-reduced-motion` 下自动关闭
+
 ## 状态与边界
 
 - 核心机制与实验均在 mock 仿真上完成([L1]/[L2]),**尚未在真实 GPU 上验证**([L3],issue #3)。
 - 本仓库的性能数据依然为仿真数字验证的结果。
+- 实验复现:`python scripts/run_experiments.py`(结果记录不随仓库提交)
 
 ## 本机环境注意事项(sandbox)
 

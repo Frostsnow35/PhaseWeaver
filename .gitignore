@@ -30,3 +30,7 @@ pytest-cache-files-*/
 
 .gh-cache/
 
+
+# 本地记录与临时产物(不进仓库)
+_local/
+.coverage

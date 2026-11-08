@@ -79,7 +79,7 @@ uv run mypy --platform win32 src/phaseweaver
 
 - [ ] 是否引入新的不变量违反路径?是否补了 property test?
 - [ ] 事件类型是否登记?payload 是否含单位(字节/毫秒)?
-- [ ] 指标口径是否变化?若变化,`docs/notes/experiments.md` 是否同步?
+- [ ] 指标口径是否变化?若变化,是否已在 PR 描述中给出复现结果(实验记录不入库)?
 - [ ] 是否把 mock 数字写成了性能结论?
 - [ ] 单文件是否超过 400 行?超了是否拆分?
 

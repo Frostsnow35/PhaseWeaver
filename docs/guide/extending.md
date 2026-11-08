@@ -79,7 +79,7 @@ CHAT = Profile(
 ```
 
 Profile 只是默认值的集合,不影响运行时能力。新增场景时请同时给出一个可复现工作负载
-(`examples/workloads/*.toml`),并在 `docs/notes/experiments.md` 里记录一组数字——没有数字的
+(`examples/workloads/*.toml`),并给出一组可复现的数字(写进 PR 描述即可,实验记录不入库)——没有数字的
 场景档案等于没有验证。
 
 ## 5. 模块化扩展(入口点,已实现)

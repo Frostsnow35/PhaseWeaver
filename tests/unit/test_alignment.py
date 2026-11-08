@@ -1,7 +1,8 @@
 """R6: phase alignment policy.
 
-The experiment verdict is negative (see docs/notes/experiments.md §9), but the
-policy and the admission gate it relies on must still behave as specified.
+The experiment verdict is negative (records are kept outside the repo, per project
+policy; the workload and policy stay in-tree for reproduction), but the policy and
+the admission gate it relies on must still behave as specified.
 """
 
 from __future__ import annotations

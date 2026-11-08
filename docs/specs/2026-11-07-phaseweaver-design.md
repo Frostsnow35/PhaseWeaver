@@ -366,7 +366,7 @@ PhaseWeaver/
 │  ├─ specs/2026-11-07-phaseweaver-design.md
 │  ├─ plans/                   # 实施计划(writing-plans 产出)
 │  ├─ adr/0001..0005           # 关键取舍
-│  └─ notes/related-work.md
+│  └── issues/                 # 后续工作与待验证项
 ├─ src/phaseweaver/
 │  ├─ __init__.py  types.py  errors.py  protocols.py
 │  ├─ phases.py  units.py  leases.py  policy.py

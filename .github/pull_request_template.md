@@ -11,7 +11,7 @@
 - [ ] `uv run pytest -q` 全绿
 - [ ] `uv run ruff check .` 通过
 - [ ] `uv run mypy src/phaseweaver` 通过
-- [ ] 若修改了实验链路,已更新 `docs/notes/experiments.md`
+- [ ] 若修改了实验链路,已在 PR 描述中给出复现命令与结果(实验记录不入库)
 
 ## 影响面
 
