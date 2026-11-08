@@ -12,7 +12,7 @@
   `inherit_mode = none | handoff`。
 - **M5**:`OpenAICompatBackend`(stdlib HTTP)与 `VLLMBackend`(可选引擎级 sleep/wake),
   实现与 mock 相同的 `InferenceBackend` 协议;能力协商会把 `OFFLOAD` 自动降级为 `DROP`。
-- 文档:开发日志与实验记录后来移出仓库,只保留在本地(`_local/notes/`);仓库只留可复现脚本与验收标准。
+- 仓库:实验记录、开发日志、取舍记录(ADR)移出仓库,只保留在本地(`_local/`);仓库只留可复现脚本、契约文档与 `AGENTS.md` 的 PR 规范。
 - 子 Agent 扇出:`Runtime.fork()` 现在会让父单元先 park 上下文并进入 `WAITING`(满足 I1),
   join 后回到 `REASONING`;并发 fork 用深度计数保证阶段正确。
 - 工作负载支持 `fanout` / `sub_rounds`,新增 `examples/workloads/w5-fanout.toml`。

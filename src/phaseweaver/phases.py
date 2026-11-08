@@ -1,6 +1,6 @@
 """Two transition tables: Phase (execution stage) and ContextState (inference context).
 
-They are orthogonal (ADR-0001). This module is their single authoritative definition.
+They are orthogonal. This module is their single authoritative definition.
 """
 
 from __future__ import annotations

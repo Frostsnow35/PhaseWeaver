@@ -34,4 +34,4 @@ body:
     attributes:
       label: 是否需要 ADR
       options:
-        - label: 这个改动会推翻已有 ADR 或引入新取舍(需要在 docs/adr 记录)
+        - label: 这个改动会引入或推翻既有设计取舍(在 PR 描述中说明,记录不入库)

@@ -1,4 +1,4 @@
-"""Leases: disposition rights plus a cost model (ADR-0002).
+"""Leases: disposition rights plus a cost model.
 
 The broker only decides and accounts; it never touches the engine. Two extra
 concerns live here because they are pure accounting:

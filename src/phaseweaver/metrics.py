@@ -1,4 +1,4 @@
-"""Metrics replayed from the event journal (ADR-0003: no parallel counters)."""
+"""Metrics replayed from the event journal (no parallel counters)."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""B2: global SLO scheduler (ADR-0005).
+"""B2: global SLO scheduler.
 
 Decisions use only the read-only snapshot plus its own history (park cooldown,
 thrash window, DRR deficit).

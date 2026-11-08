@@ -113,7 +113,7 @@ async with PhaseWeaver(backend="my-engine", profile="research") as pw:
 
 ## 开发约定(摘要)
 
-- 改状态机前先读 `docs/adr/0001-phase-context-orthogonality.md`;新增转移必须同时补测试。
+- 改状态机前先读设计规格中「阶段与上下文正交」一节;新增转移必须同时补测试。
 - 不变量 I1–I8 见 `src/phaseweaver/invariant.py`;任何新路径都要能通过 property test。
 - 事件类型是封闭集合,新增前必须登记到规格 §10。
 - 提交前:`pwsh scripts/check.ps1`(或 `uv run pytest && uv run ruff check . && uv run mypy src/phaseweaver`)。

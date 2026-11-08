@@ -1,4 +1,4 @@
-"""Append-only event journal: the single source of truth (ADR-0003)."""
+"""Append-only event journal: the single source of truth (no parallel counters)."""
 
 from __future__ import annotations
 
