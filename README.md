@@ -87,18 +87,6 @@ uv run mypy src/phaseweaver
 uv run mypy --platform linux src/phaseweaver
 ```
 
-工程约定见 [CONTRIBUTING.md](CONTRIBUTING.md),取舍记录见 [docs/adr/](docs/adr/),
-开发历史与教训见 [docs/notes/devlog.md](docs/notes/devlog.md)。
-
-### Demo 站点
-
-静态页在 [`site/index.html`](site/index.html),由 GitHub Actions 发布到 GitHub Pages:
-
-- 工作流:`.github/workflows/pages.yml`(构建 `site/` 制品 → `deploy-pages`)
-- 仓库 Settings → Pages → **Source: GitHub Actions**(只需设置一次)
-- 本地预览:`python -m http.server 8000 -d site`,或直接打开该文件
-- 单文件、无外部请求、可离线打开;动效在 `prefers-reduced-motion` 下自动关闭
-
 ## 状态与边界
 
 - 核心机制与实验均在 mock 仿真上完成([L1]/[L2]),**尚未在真实 GPU 上验证**([L3],issue #3)。
