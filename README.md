@@ -12,9 +12,6 @@
 KV Cache 仍占着显存,其他 Agent 只能排队。PhaseWeaver 把这个切换点变成主动决策:
 **保留 / 卸载 / 丢弃 / 释放**,并把代价写进账里;子 Agent 之间还能**移交 KV 所有权**。
 
-> 它不是编排框架。契约只有一条:推理与工具调用经过 `unit.reason()` / `unit.call_tool()`,
-> 让运行时看见阶段切换。详见 [它是什么](docs/guide/what-is-it.md)。
-
 **Live demo**: <https://frostsnow35.github.io/PhaseWeaver/>
 
 ## 五分钟开始
