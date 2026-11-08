@@ -91,7 +91,6 @@ uv run mypy --platform linux src/phaseweaver
 
 - 核心机制与实验均在 mock 仿真上完成([L1]/[L2]),**尚未在真实 GPU 上验证**([L3],issue #3)。
 - 本仓库的性能数据依然为仿真数字验证的结果。
-- 实验记录:[docs/notes/experiments.md](docs/notes/experiments.md)
 
 ## 本机环境注意事项(sandbox)
 
