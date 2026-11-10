@@ -40,7 +40,6 @@ No GPU required: the default is a deterministic simulation backend (virtual cloc
 KV accounting) that reproduces exactly for the same seed.
 
 - [Quickstart](docs/guide/quickstart.md) · [Extending](docs/guide/extending.md) · [Design spec](docs/specs/2026-11-07-phaseweaver-design.md)
-- Interactive playground: <https://frostsnow35.github.io/PhaseWeaver/playground.html> ([source](site/playground.html); single file, offline, no GPU)
 - Project page: [site/index.html](site/index.html)
 
 <a id="profiles"></a>

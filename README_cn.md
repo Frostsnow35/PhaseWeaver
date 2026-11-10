@@ -37,7 +37,6 @@ asyncio.run(main())
 无需 GPU:默认使用确定性仿真后端(虚拟时钟 + 块级 KV 记账),同 seed 结果可复现。
 
 - [快速开始](docs/guide/quickstart.md) · [扩展指南](docs/guide/extending.md) · [设计规格](docs/specs/2026-11-07-phaseweaver-design.md)
-- 交互实验场:<https://frostsnow35.github.io/PhaseWeaver/playground.html>([源码](site/playground.html);单文件,可离线,无需 GPU)
 - 项目展示页:[site/index.html](site/index.html)
 
 <a id="profiles"></a>

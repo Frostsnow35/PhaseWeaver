@@ -14,7 +14,6 @@
 - `scripts/probe_capacity.py`:`[L2]` 容量放大上界闸门(等效容量 `C*(1+k)`,零内核改动),原始行写 `runs/capacity-probe.json`。
 - `scripts/make_kaggle_notebook.py` + `scripts/kaggle_cells.py` / `kaggle_cells_late.py`:生成自包含的 Kaggle T4 x2 参数标定 notebook v2(7 个 cell,纯 PyTorch + Transformers,不起 vLLM/SGLang);产物落在 `_local/`(不入库)。cell 源码按 AGENTS.md §51 拆成两个 <400 行模块。
 - `scripts/probe_calibration.py`:读 `calibration.json`,用真机常数重跑 A 的两条 `[L2]` 闸门(前缀命中增益 / 容量放大增益),对 prefill / decode / 带宽 / α 做 6 变体鲁棒性网格;`run_one(backend_caps=...)` 为回灌入口,默认 `None` 时逐位保持原行为。原始行写 `runs/calibration-probe.json`(不入库)。
-- `site/playground.html` + `scripts/build_playground_data.py`:构建期用真实 `run_one` 生成 36 个网格点(4 容量 × 3 工具时长 × 3 并发 × 2 策略 × 3 seeds),数据内嵌进单文件,离线可开、无外部请求;含中英切换、相位 Gantt、URL 参数分享、`[L2]` 前缀负结果面板。站点首页加入口与中文 README 链接。
 - `examples/traces/sample.jsonl`:12 单元合成样例轨迹;`.gitignore` 增加 `!examples/traces/*.jsonl` 例外。
 - 拆分 `demo.py`:工作负载模型与 `run_one` 留在 `demo.py`(243 行),argparse / 表格 / 子命令分派移到新增 `cli.py`(326 行),消除 >400 行违规;`main()` 保留为薄壳,`python -m phaseweaver.demo` 与 console script 行为不变(同一负载数字逐位一致)。
 - `scripts/delivery_check.py` 的 lint 闸门先试 PATH 上的 `ruff`,再回退 `python -m ruff`;`docs/quality/delivery.md` 同步测试数与偶发子进程测试的复跑口径。
@@ -40,6 +39,10 @@
 - 实验结论:成本模型(B2c)显著劣于 slack 启发式,默认不启用,记录为负结果。
 - **ISOLATE 语义**:子单元因配额失败时不再杀死父任务,异常在 `fork()` 边界内被收敛。
 
+### Removed
+
+- `site/playground.html` 与 `scripts/build_playground_data.py`:交互实验场移出范围,两份 README 与站点首页/页脚的入口链接一并移除。零安装试用改由 `phaseweaver replay`(`docs/guide/quickstart.md`)承载;Pages 上的 `/playground.html` 会 404。负结果「27/36 网格点 B2 与 B0 一致」保留在 Known issues。
+
 ### Known issues
 
 - K6:B4 下界与 α 吞吐模型不自洽,optimality gap 暂不可引用。
@@ -50,7 +53,7 @@
 - **[L3] 首轮真机标定(Kaggle T4 x2,2026-11-10)**:`bytes_per_token=57344` 与 Qwen2.5-7B 的 config 精确对齐;PCIe 实测 d2h 13.02 / h2d 12.22 GB/s(mock 12.88 GB/s,−5%);decode 33–34 tok/s(mock 45,高估 36%);batched decode 拟合 `contention_alpha≈0.0175`(mock 0.15,高估约 8 倍)。口径为 `[L3] micro-benchmark / parameter calibration`,非端到端结果;提取的数据在 `runs/kaggle-l3/`(不入库)。
 - **v1 标定数据三处无效项,不得引用**:① Cell 2 把首次 CUDA kernel 初始化的 256-token 前向计入(164 tok/s),5 长度取均值造出 4152 tok/s;去冷启动后按长度为 6372 / 7109 / 4552 / 2562 tok/s,`t(4096)/t(1024)=11.1`(4× token 线性应为 4.0),常数 prefill 模型不成立。② Cell 4 的 `for t in held: del t` 只解绑循环变量、张量从未释放,得到 105 / 0 / 26 / 0 的非单调曲线,且未预留权重显存。③ Cell 6 把空闲显存 13.0 GiB 写成 `capacity_bytes`,但 mock 的 capacity 是 KV 预算;7B fp16 权重约 14.2 GiB,在单卡 14.56 GiB 上几乎放不下。notebook v2 已修三处:warmup + 3 次取中位 + 按长度曲线、`held.clear()` + 权重预留、不再产出单一 prefill 常数。
 - **A 终审补强**:`scripts/probe_calibration.py` 用上述真值及其上下界跑 6 个变体(3 seeds × 6 负载),前缀命中闸门 0–1/6 通过判停,容量放大闸门 4–5/6 通过、平均增益 21.6%–32.4%;**0/6 变体满足「两闸门同时翻转」的重开条件**,自建 refcount 账本路线维持关闭,容量收益仍由引擎原生 prefix caching 承接。口径限制:速率来自 0.5B、`bytes_per_token` 来自 7B,不是同一份 `BackendCaps`,只用作鲁棒性边界,不回填。
-- B2 在容量不紧张时全程 `RETAIN`、与 B0 完全一致(playground 36 个网格点中 27 个如此);这是设计行为,已在该页显式说明,不作为收益呈现。
+- B2 在容量不紧张时全程 `RETAIN`、与 B0 完全一致(原 36 点网格中 27 个如此);这是设计行为,不作为收益呈现。该网格随 playground 移除,两条闸门仍可由 `scripts/probe_prefix.py` / `probe_capacity.py` 复现。
 
 ### 计划中
 
