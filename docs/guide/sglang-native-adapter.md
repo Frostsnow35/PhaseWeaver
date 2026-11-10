@@ -3,6 +3,24 @@
 证据等级：接口形态来自 SGLang 官方文档（native API、HiCache / RadixAttention），
 **未在真实 SGLang 服务上验证**。本分支不产出 `[L3]` 结论，也不声称任何性能收益。
 
+## 本分支已实现（`[L3]-pending`）
+
+| 文件 | 内容 |
+|---|---|
+| `src/phaseweaver/backends/sglang.py` | `SGLangNativeBackend`：`/server_info` 探测、`/generate` 原生数据面、`/flush_cache?timeout=`、`/get_model_info`、`/health_generate`；`SGLangCapabilities` / `capability_snapshot()` |
+| `tests/integration/test_sglang_native.py` | 10 项 fake HTTP server 契约测试，零引擎依赖 |
+
+覆盖：`/server_info` 的 `max_total_num_tokens` 到 `capacity_bytes` 的估算映射、未知/失败响应的保守降级、
+原生 `/generate` 请求形状、`flush_cache` 显式开关与 timeout 编码、`OFFLOAD → DROP`、
+原生调用异常包装，以及取消 / 超时后适配器状态不残留。
+
+## 本版明确不做
+
+- 不实现 session / rid 的前缀复用数据面，不控制 HiCache L2/L3 预取；声明了 HiCache 也仍降级 `DROP`，`SGLangCapabilities.supports_offload` 恒为 `False`。
+- 不统计 RadixCache 命中、不改写 `recompute_tokens`；block 级引用计数在引擎内部，HTTP 层拿不到。
+- `kv_pool_bytes` 是 `max_total_num_tokens × 配置的 bytes_per_token` 的**估算**，不是引擎上报的字节数；`capability_snapshot()` 已标注来源。
+- 不修改 `main` 的 `BackendCaps`；能力通过 `capability_snapshot()` 暴露，待真机验证后再决定是否提升为公共契约。
+
 ## 现状与缺口
 
 `main` 没有 SGLang 后端。若直接复用 `OpenAICompatBackend`，只能走 `/v1/chat/completions`，
@@ -34,13 +52,13 @@
 
 ## 待验证项
 
-| 项 | 无 GPU 可做 | 需真机 |
-|---|---|---|
-| 原生端点路径 / method / 请求体与降级路径 | fake HTTP server 契约测试 | — |
-| `/server_info` 内存池字段到 `BackendCaps.capacity_bytes` 的映射 | 契约测试（固定响应样本） | — |
-| 取消 / 异常 / 超时三条清理路径 | 契约测试 | — |
-| RadixCache 命中率、HiCache L2/L3 命中与 TTFT | — | ≥24 GiB 单卡 |
-| 前缀共享对扇出负载的容量放大 | — | 起引擎后 |
+| 项 | 状态 |
+|---|---|
+| 原生端点路径 / method / 请求体与降级路径 | 契约测试已覆盖（无 GPU） |
+| `/server_info` 内存池字段到 `BackendCaps.capacity_bytes` 的映射 | 契约测试已覆盖；字段布局按版本容错查找，未对具体发行版校验 |
+| 未知形状 / HTTP 失败 / 超时 / 取消后状态不残留 | 契约测试已覆盖 |
+| RadixCache 命中率、HiCache L2/L3 命中与 TTFT | 需 ≥24 GiB 单卡，未做 |
+| 前缀共享对扇出负载的容量放大 | 需起引擎，未做 |
 
 ## 关联
 
