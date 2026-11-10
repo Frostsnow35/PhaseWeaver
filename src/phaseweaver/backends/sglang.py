@@ -14,23 +14,37 @@ than pretending it moved KV.
 What this branch deliberately does NOT do: no session/rid prefix-reuse data
 path, no HiCache prefetch control, no prefix-hit accounting, no change to
 ``BackendCaps`` in ``main``.
+
+Transport and capability reporting come from ``backends/http_admin.py`` and
+``backends/capability.py``. The KV-pool byte figure is an ESTIMATE
+(``max_total_tokens x configured bytes_per_token``) and never silently becomes
+the lease budget.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
-import urllib.error
-import urllib.request
 from dataclasses import dataclass, replace
 from typing import Any
 
+from phaseweaver.backends.capability import (
+    CapabilityField,
+    CapabilityOrigin,
+    CapabilityReport,
+)
+from phaseweaver.backends.http_admin import (
+    AdminHttpClient,
+    AdminHttpConfig,
+    BackendAdminError,
+)
 from phaseweaver.backends.openai_compat import OpenAICompatBackend, OpenAICompatConfig
 
 _TOKEN_KEYS = frozenset({"max_total_num_tokens", "max_total_tokens"})
+_CONTRACT_VERSION = "sglang-native/1"
+_EVIDENCE = "[L3]-pending / protocol-level probe, no real-GPU result"
 
 
-class SGLangAdminError(RuntimeError):
+class SGLangAdminError(BackendAdminError):
     """A native SGLang endpoint failed, timed out, or returned an unusable body."""
 
 
@@ -65,12 +79,24 @@ class SGLangNativeBackend(OpenAICompatBackend):
         radix_cache_enabled: bool = True,
         hicache_enabled: bool = False,
         allow_flush_cache: bool = False,
+        accept_estimated_capacity: bool = False,
+        engine_version: str = "unverified",
     ) -> None:
         super().__init__(config)
         self._radix_cache_enabled = radix_cache_enabled
         self._hicache_enabled = hicache_enabled
         self._allow_flush_cache = allow_flush_cache
+        self._accept_estimated_capacity = accept_estimated_capacity
+        self._engine_version = engine_version
+        self._http = AdminHttpClient(
+            AdminHttpConfig(
+                base_url=self.config.base_url,
+                api_key=self.config.api_key,
+                timeout_s=self.config.timeout_s,
+            )
+        )
         self._sglang_caps = SGLangCapabilities(probed=False)
+        self._report = self._build_report(self._sglang_caps)
         self._caps = replace(self._caps, supports_offload=False)
 
     # --- capability probe -------------------------------------------------
@@ -78,21 +104,50 @@ class SGLangNativeBackend(OpenAICompatBackend):
     def capabilities(self) -> SGLangCapabilities:
         return self._sglang_caps
 
+    @property
+    def capability_report(self) -> CapabilityReport:
+        return self._report
+
     def capability_snapshot(self) -> dict[str, object]:
         """Flat record for experiment reports; never a performance measurement."""
-        caps = self._sglang_caps
-        return {
-            "engine": "sglang",
-            "evidence": "[L3]-pending / protocol-level probe, no real-GPU result",
-            "probed": caps.probed,
-            "radix_cache_declared": caps.radix_cache,
-            "hicache_declared": caps.hicache,
-            "max_total_tokens": caps.max_total_tokens,
-            "kv_pool_bytes": caps.kv_pool_bytes,
-            "kv_pool_source": "max_total_tokens x configured bytes_per_token (estimate)",
-            "offload_data_path": "not implemented (OFFLOAD degrades to DROP)",
-            "detail": caps.detail,
-        }
+        return self._report.as_dict()
+
+    def _build_report(self, caps: SGLangCapabilities) -> CapabilityReport:
+        declared = CapabilityOrigin.DECLARED
+        unknown = CapabilityOrigin.UNKNOWN
+        fields = (
+            CapabilityField("radix_cache_declared", caps.radix_cache, declared,
+                            "server radix-cache flag; refcounts stay engine-internal"),
+            CapabilityField("hicache_declared", caps.hicache, declared,
+                            "server --enable-hierarchical-cache"),
+            CapabilityField(
+                "max_total_tokens", caps.max_total_tokens,
+                CapabilityOrigin.PROBED if caps.max_total_tokens else unknown,
+                "read from GET /server_info",
+            ),
+            CapabilityField(
+                "kv_pool_bytes", caps.kv_pool_bytes,
+                CapabilityOrigin.ESTIMATED if caps.kv_pool_bytes else unknown,
+                "max_total_tokens x configured bytes_per_token (not engine-reported)",
+            ),
+            CapabilityField("kv_pool_source",
+                            "max_total_tokens x configured bytes_per_token (estimate)",
+                            declared),
+            CapabilityField("offload_data_path",
+                            "not implemented (OFFLOAD degrades to DROP)", declared),
+            CapabilityField("supports_offload", caps.supports_offload, declared),
+            CapabilityField("server_info_keys", caps.server_info_keys,
+                            CapabilityOrigin.PROBED if caps.probed else unknown),
+        )
+        return CapabilityReport(
+            engine="sglang",
+            contract_version=_CONTRACT_VERSION,
+            evidence=_EVIDENCE,
+            probed=caps.probed,
+            fields=fields,
+            engine_version_checked=self._engine_version,
+            detail=caps.detail,
+        )
 
     async def probe(self) -> SGLangCapabilities:
         """Read /server_info once. Failure or unknown shape is conservative."""
@@ -101,7 +156,7 @@ class SGLangNativeBackend(OpenAICompatBackend):
             parsed: Any = json.loads(raw)
             if not isinstance(parsed, dict):
                 raise SGLangAdminError("/server_info is not a JSON object")
-        except (SGLangAdminError, json.JSONDecodeError) as exc:
+        except (BackendAdminError, json.JSONDecodeError) as exc:
             caps = SGLangCapabilities(probed=False, detail=f"server_info unusable: {exc}")
         else:
             tokens = _find_token_pool(parsed)
@@ -119,9 +174,16 @@ class SGLangNativeBackend(OpenAICompatBackend):
                 ),
             )
         self._sglang_caps = caps
+        self._report = self._build_report(caps)
+        # The estimate only enters the lease budget on explicit opt-in.
+        capacity = (
+            caps.kv_pool_bytes
+            if self._accept_estimated_capacity and caps.kv_pool_bytes
+            else self._caps.capacity_bytes
+        )
         self._caps = replace(
             self._caps,
-            capacity_bytes=caps.kv_pool_bytes or self._caps.capacity_bytes,
+            capacity_bytes=capacity,
             supports_offload=caps.supports_offload,
         )
         return caps
@@ -160,23 +222,10 @@ class SGLangNativeBackend(OpenAICompatBackend):
     async def _call(
         self, method: str, path: str, payload: dict[str, object] | None = None
     ) -> str:
-        return await asyncio.to_thread(self._request, method, path, payload)
-
-    def _request(
-        self, method: str, path: str, payload: dict[str, object] | None = None
-    ) -> str:
-        url = self.config.base_url.rstrip("/") + path
-        data = json.dumps(payload).encode("utf-8") if payload is not None else None
-        headers = {"Content-Type": "application/json"} if data is not None else {}
-        if self.config.api_key:
-            headers["Authorization"] = f"Bearer {self.config.api_key}"
-        request = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(request, timeout=self.config.timeout_s) as resp:
-                raw: bytes = resp.read()
-                return raw.decode("utf-8")
-        except (urllib.error.URLError, OSError, TimeoutError) as exc:
-            raise SGLangAdminError(f"{method} {path} failed: {exc}") from exc
+            return await self._http.call(method, path, payload)
+        except BackendAdminError as exc:
+            raise SGLangAdminError(str(exc)) from exc
 
 
 def _find_token_pool(payload: dict[str, Any], depth: int = 0) -> int | None:

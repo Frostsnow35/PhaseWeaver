@@ -8,17 +8,30 @@
 | 文件 | 内容 |
 |---|---|
 | `src/phaseweaver/backends/sglang.py` | `SGLangNativeBackend`：`/server_info` 探测、`/generate` 原生数据面、`/flush_cache?timeout=`、`/get_model_info`、`/health_generate`；`SGLangCapabilities` / `capability_snapshot()` |
-| `tests/integration/test_sglang_native.py` | 10 项 fake HTTP server 契约测试，零引擎依赖 |
+| `tests/integration/test_sglang_native.py` | 11 项 fake HTTP server 契约测试，零引擎依赖 |
 
-覆盖：`/server_info` 的 `max_total_num_tokens` 到 `capacity_bytes` 的估算映射、未知/失败响应的保守降级、
+覆盖：`/server_info` 的 `max_total_num_tokens` 到 KV 池字节的估算映射、未知/失败响应的保守降级、
 原生 `/generate` 请求形状、`flush_cache` 显式开关与 timeout 编码、`OFFLOAD → DROP`、
 原生调用异常包装，以及取消 / 超时后适配器状态不残留。
+
+## 可扩展性收口（与 `main` 共用，非分支私有）
+
+| 维度 | 收口前 | 收口后 |
+|---|---|---|
+| HTTP 传输 | 适配器内自写 `_request` 一份 | 复用 `backends/http_admin.py` 的 `AdminHttpClient`，与 vLLM 分支、`OpenAICompatBackend` 同一套 auth / 超时 / HTTP 状态 / JSON 错误策略 |
+| 错误类型 | `SGLangAdminError(RuntimeError)` 与其他引擎互不兼容 | `SGLangAdminError(BackendAdminError)`，上层可按统一基类捕获管理面故障 |
+| 能力快照 | 无 schema 的扁平 dict | `CapabilityReport`：`kv_pool_bytes_origin=estimated`、`max_total_tokens_origin=probed`、启动参数为 `declared`；附 `contract_version=sglang-native/1` 与 `engine_version_checked` |
+| 资源预算 | `tokens × 57344` 的估算值直接写 `caps().capacity_bytes` | 默认只写进报告；只有 `accept_estimated_capacity=True` 才进入租约预算 |
+
+`57344` 是 7B 模型的假设，不是引擎上报值；真机需用 `/get_model_info` 的 config 重算
+(`num_hidden_layers × num_key_value_heads × head_dim × 2 × dtype_bytes`)。
+`contract_version` 在端点形状变化时递增；`engine_version_checked` 默认 `unverified`。
 
 ## 本版明确不做
 
 - 不实现 session / rid 的前缀复用数据面，不控制 HiCache L2/L3 预取；声明了 HiCache 也仍降级 `DROP`，`SGLangCapabilities.supports_offload` 恒为 `False`。
 - 不统计 RadixCache 命中、不改写 `recompute_tokens`；block 级引用计数在引擎内部，HTTP 层拿不到。
-- `kv_pool_bytes` 是 `max_total_num_tokens × 配置的 bytes_per_token` 的**估算**，不是引擎上报的字节数；`capability_snapshot()` 已标注来源。
+- `kv_pool_bytes` 是 `max_total_num_tokens × 配置的 bytes_per_token` 的**估算**，不是引擎上报的字节数；`capability_snapshot()` 标为 `estimated`，且默认不写入 `caps().capacity_bytes`（显式 `accept_estimated_capacity=True` 除外）。
 - 不修改 `main` 的 `BackendCaps`；能力通过 `capability_snapshot()` 暴露，待真机验证后再决定是否提升为公共契约。
 
 ## 现状与缺口
@@ -55,7 +68,8 @@
 | 项 | 状态 |
 |---|---|
 | 原生端点路径 / method / 请求体与降级路径 | 契约测试已覆盖（无 GPU） |
-| `/server_info` 内存池字段到 `BackendCaps.capacity_bytes` 的映射 | 契约测试已覆盖；字段布局按版本容错查找，未对具体发行版校验 |
+| `/server_info` 内存池字段到 KV 池字节的估算映射 | 契约测试已覆盖；字段布局按版本容错查找，未对具体发行版校验 |
+| 真值 `bytes_per_token`（由 `/get_model_info` config 计算）与 `engine_version_checked` | 需起引擎，未做；当前估算沿用 7B 假设 57344 |
 | 未知形状 / HTTP 失败 / 超时 / 取消后状态不残留 | 契约测试已覆盖 |
 | RadixCache 命中率、HiCache L2/L3 命中与 TTFT | 需 ≥24 GiB 单卡，未做 |
 | 前缀共享对扇出负载的容量放大 | 需起引擎，未做 |

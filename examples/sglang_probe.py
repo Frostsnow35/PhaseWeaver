@@ -24,6 +24,8 @@ async def main() -> None:
         OpenAICompatConfig(base_url="http://127.0.0.1:30000"),
         radix_cache_enabled=True,
         hicache_enabled=False,
+        # Set to the exact SGLang release once endpoint shapes are verified on hardware.
+        engine_version="unverified",
     )
     await backend.probe()
     print(json.dumps(backend.capability_snapshot(), indent=2, ensure_ascii=False))

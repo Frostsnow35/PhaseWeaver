@@ -101,9 +101,10 @@ def backend(server: str, **kwargs: Any) -> SGLangNativeBackend:
     return SGLangNativeBackend(config, **kwargs)
 
 
-def test_server_info_probe_maps_token_pool_to_capacity(server: str) -> None:
+def test_server_info_probe_marks_pool_as_estimate(server: str) -> None:
     async def scenario() -> tuple[int, dict[str, object]]:
-        b = backend(server, radix_cache_enabled=True, hicache_enabled=True)
+        b = backend(server, radix_cache_enabled=True, hicache_enabled=True,
+                    engine_version="v0.5.0")
         caps = await b.probe()
         assert caps.max_total_tokens == _TOKENS
         assert caps.supports_offload is False
@@ -111,13 +112,29 @@ def test_server_info_probe_maps_token_pool_to_capacity(server: str) -> None:
         return b.caps().capacity_bytes, b.capability_snapshot()
 
     capacity, snapshot = asyncio.run(scenario())
-    assert capacity == _TOKENS * 57344
     assert snapshot["kv_pool_bytes"] == _TOKENS * 57344
+    assert snapshot["kv_pool_bytes_origin"] == "estimated"
+    assert snapshot["max_total_tokens_origin"] == "probed"
+    assert snapshot["radix_cache_declared_origin"] == "declared"
+    assert snapshot["contract_version"] == "sglang-native/1"
+    assert snapshot["engine_version_checked"] == "v0.5.0"
     assert snapshot["probed"] is True
     assert snapshot["radix_cache_declared"] is True
     assert snapshot["hicache_declared"] is True
     assert str(snapshot["evidence"]).startswith("[L3]-pending")
     assert ("GET", "/server_info", b"") in _Handler.records
+    # An estimate derived from an assumed bytes_per_token must NOT become the
+    # lease budget without an explicit opt-in.
+    assert capacity == _CAPACITY
+
+
+def test_estimated_capacity_needs_explicit_opt_in(server: str) -> None:
+    async def scenario() -> int:
+        b = backend(server, accept_estimated_capacity=True)
+        await b.probe()
+        return b.caps().capacity_bytes
+
+    assert asyncio.run(scenario()) == _TOKENS * 57344
 
 
 def test_probe_unknown_shape_stays_conservative(server: str) -> None:
