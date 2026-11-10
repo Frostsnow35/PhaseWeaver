@@ -9,7 +9,7 @@ uv run ruff check .
 uv run mypy src/phaseweaver
 ```
 
-Windows 本机有 5 条 sandbox 约束(管道/`taskkill`/`mkdtemp` 等),先读 [README](README.md#本机环境注意事项sandbox),
+Windows 本机有 5 条 sandbox 约束(管道/`taskkill`/`mkdtemp` 等),先读 [README_cn](README_cn.md#sandbox) / [README](README.md#sandbox),
 否则会重复踩坑。一键检查脚本:`pwsh scripts/check.ps1`。
 
 ## 工作流:规格 → 计划 → 实现

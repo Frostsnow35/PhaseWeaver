@@ -41,15 +41,29 @@ class MockBackend:
         journal: EventJournal | None = None,
         *,
         run_id: str = "r1",
+        prefix_hit_ratio: float = 0.0,
     ) -> None:
+        """``prefix_hit_ratio`` is an [L2] experimental upper-bound knob, not a
+        mechanism: it discounts the prefill work charged to a recompute as if
+        that fraction of the context were already present in a shared prefix
+        cache. 0.0 (default) keeps the backend bit-for-bit identical to the
+        original model; no refcounting or block dedup is performed here.
+        """
         self._caps = caps
         self._clock = clock
         self._journal = journal
         self._run_id = run_id
+        self._prefix_hit_ratio = min(1.0, max(0.0, prefix_hit_ratio))
         self._allocs: dict[str, _Allocation] = {}
         self._events: list[EngineEvent] = []
         self._used_blocks = 0
         self._active = 0
+
+    def _recompute_tokens(self, resident_tokens: int) -> int:
+        if self._prefix_hit_ratio <= 0.0:
+            return resident_tokens
+        cached = int(resident_tokens * self._prefix_hit_ratio)
+        return max(1, resident_tokens - cached)
 
     # --- protocol ---------------------------------------------------------
     def caps(self) -> BackendCaps:
@@ -74,7 +88,7 @@ class MockBackend:
         self._active += 1
         try:
             if handle.dropped:
-                recompute = handle.resident_tokens
+                recompute = self._recompute_tokens(handle.resident_tokens)
                 self._allocate(handle.context_id, handle.resident_tokens)
                 handle.dropped = False
             prompt = handle.resident_tokens + recompute
@@ -144,8 +158,8 @@ class MockBackend:
         recompute = 0
         alloc = self._allocs.get(handle.context_id)
         if alloc is None or handle.dropped:
-            recompute = handle.resident_tokens
-            self._allocate(handle.context_id, recompute)
+            recompute = self._recompute_tokens(handle.resident_tokens)
+            self._allocate(handle.context_id, handle.resident_tokens)
             await self._clock.wait(recompute / self._caps.prefill_tok_per_s)
         handle.dropped = False
         return RestoreResult(

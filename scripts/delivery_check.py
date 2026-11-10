@@ -41,8 +41,22 @@ def gate_tests() -> Gate:
 
 
 def gate_lint() -> Gate:
-    ok, last = run([sys.executable, "-m", "ruff", "check", "."])
-    return Gate("lint", ok, last)
+    """Prefer the ruff executable, then the module form.
+
+    Some uv environments install the ``ruff`` wheel without a console script in
+    the venv, so ``python -m ruff`` cannot locate its binary even though ruff is
+    on PATH. Trying both keeps the gate honest on those machines.
+    """
+    last = "ruff not found"
+    for cmd in (["ruff", "check", "."], [sys.executable, "-m", "ruff", "check", "."]):
+        try:
+            ok, output = run(cmd)
+        except OSError:
+            continue
+        last = output
+        if ok:
+            return Gate("lint", True, last)
+    return Gate("lint", False, last)
 
 
 def gate_types() -> Gate:

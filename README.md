@@ -1,20 +1,22 @@
 # PhaseWeaver
 
-**Agent 执行运行时**:让 Agent 在"推理 ↔ 工具 ↔ 等待"之间的阶段切换,变成可编程的 GPU 资源决策。
+English | [中文](https://github.com/Frostsnow35/PhaseWeaver/blob/main/README_cn.md)
 
-[![CI](https://github.com/Frostsnow35/PhaseWeaver/actions/workflows/ci.yml/badge.svg)](https://github.com/Frostsnow35/PhaseWeaver/actions/workflows/ci.yml)
-[![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue)](pyproject.toml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+An agent execution runtime that turns phase switches between **reasoning ↔ tools ↔ waiting**
+into programmable GPU resource decisions.
 
-## 它解决什么
+Documentation: <https://frostsnow35.github.io/PhaseWeaver/>
 
-一个 Agent 任务通常是「推理 3 秒 → 跑工具 30 秒 → 再推理」。工具阶段 GPU 空转,但该 Agent 的
-KV Cache 仍占着显存,其他 Agent 只能排队。PhaseWeaver 把这个切换点变成主动决策:
-**保留 / 卸载 / 丢弃 / 释放**,并把代价写进账里;子 Agent 之间还能**移交 KV 所有权**。
+<a id="problem"></a>
+## What it solves · [中文](https://github.com/Frostsnow35/PhaseWeaver/blob/main/README_cn.md#problem)
 
-**Live demo**: <https://frostsnow35.github.io/PhaseWeaver/>
+An agent task is usually "reason for 3 s → run a tool for 30 s → reason again". During the tool
+phase the GPU is idle, but that agent's KV Cache still holds memory and other agents have to queue.
+PhaseWeaver turns this switch point into an active decision — **retain / offload / drop / release** —
+and books the cost. Child agents can also **transfer KV ownership** between each other.
 
-## 五分钟开始
+<a id="start"></a>
+## Five-minute start · [中文](https://github.com/Frostsnow35/PhaseWeaver/blob/main/README_cn.md#start)
 
 ```python
 import asyncio
@@ -34,35 +36,45 @@ async def main():
 asyncio.run(main())
 ```
 
-无需 GPU:默认使用确定性仿真后端(虚拟时钟 + 块级 KV 记账),同 seed 结果可复现。
+No GPU required: the default is a deterministic simulation backend (virtual clock + block-level
+KV accounting) that reproduces exactly for the same seed.
 
-- [快速开始](docs/guide/quickstart.md) · [扩展指南](docs/guide/extending.md) · [设计规格](docs/specs/2026-11-07-phaseweaver-design.md)
-- 项目展示页:[site/index.html](site/index.html)(单文件,浏览器直接打开,无外部依赖)
+- [Quickstart](docs/guide/quickstart.md) · [Extending](docs/guide/extending.md) · [Design spec](docs/specs/2026-11-07-phaseweaver-design.md)
+- Interactive playground: <https://frostsnow35.github.io/PhaseWeaver/playground.html> ([source](site/playground.html); single file, offline, no GPU)
+- Project page: [site/index.html](site/index.html)
 
-## 场景档案
+<a id="profiles"></a>
+## Scenario profiles · [中文](https://github.com/Frostsnow35/PhaseWeaver/blob/main/README_cn.md#profiles)
 
-| profile | 适用 | 默认策略 | 默认 KV 继承 |
+| profile | use case | default policy | default KV inheritance |
 |---|---|---|---|
-| `coding` | 编码 Agent,短工具、长会话 | auto(压力自适应) | 不继承 |
-| `research` | 浏览/检索,长工具 | B2(全局 SLO) | 不继承 |
-| `orchestrator` | 多 Agent 扇出/汇合 | B2 | handoff |
-| `delegation` | 链式委托(父→子→孙) | B2 | handoff |
+| `coding` | coding agents, short tools, long sessions | auto (pressure-adaptive) | none |
+| `research` | browsing / retrieval, long tools | B2 (global SLO) | none |
+| `orchestrator` | multi-agent fan-out / join | B2 | handoff |
+| `delegation` | chained delegation (parent → child → grandchild) | B2 | handoff |
 
-一条命令跑完整场景矩阵:
+After `pip install -e .`, the CLI works without a GPU:
 
 ```bash
-python -m phaseweaver.demo scenarios --capacity-gib 2 --seeds 3
+phaseweaver scenarios --capacity-gib 2 --seeds 3
+phaseweaver replay --trace examples/traces/sample.jsonl --seeds 0,1,2
 ```
 
-## 核心机制
+`replay` compares pin-always against the global SLO scheduler on **your own** agent
+trace (JSONL `reason` / `tool` events). The shipped trace is synthetic; the schema
+is documented in `phaseweaver.replay`. All output is `[L1]` simulation.
 
-- **双状态机**:`Phase`(执行阶段)与 `ContextState`(KV 归属)正交。
-- **处置权租约**:`RETAIN / OFFLOAD / DROP / RELEASE` + 引擎能力协商 + 显式降级。
-- **KV 交接**:fork 时把 KV 所有权交给子单元,join 交回——零拷贝、零重算。
-- **可证下界**:按占空比推导的 makespan 下界,用来判断调度器离结构上限有多远。
-- **事件日志记录**:日志整理记录各指标,不维护并行计数器。
+<a id="mechanism"></a>
+## Core mechanisms · [中文](https://github.com/Frostsnow35/PhaseWeaver/blob/main/README_cn.md#mechanism)
 
-## 接入真实引擎
+- **Two orthogonal state machines**: `Phase` (execution stage) and `ContextState` (KV ownership).
+- **Disposition leases**: `RETAIN / OFFLOAD / DROP / RELEASE` + engine capability negotiation + explicit degradation.
+- **KV handoff**: fork transfers KV ownership to the child, join transfers it back — zero copy, zero recompute.
+- **Provable lower bound**: a makespan bound derived from duty cycle, used to measure how far the scheduler is from the structural ceiling.
+- **Event journal**: metrics are replayed from the log; no parallel mutable counters are maintained.
+
+<a id="real-engine"></a>
+## Connecting a real engine · [中文](https://github.com/Frostsnow35/PhaseWeaver/blob/main/README_cn.md#real-engine)
 
 ```python
 from phaseweaver.backends.vllm import VLLMBackend
@@ -73,46 +85,58 @@ async with PhaseWeaver(backend=backend, profile="research") as pw:
     await pw.run("task", agent)
 ```
 
-引擎不支持的能力会自动降级(如无 KV connector 时 `OFFLOAD → DROP`),事件里记录 `degraded_from`。
-适配器协议见 [扩展指南](docs/guide/extending.md)。
+Capabilities the engine does not support degrade automatically (for example `OFFLOAD → DROP` when
+no KV connector is available), with `degraded_from` recorded on the event.
+See the [Extending guide](docs/guide/extending.md) for the adapter protocol.
 
-## 开发
+<a id="dev"></a>
+## Development · [中文](https://github.com/Frostsnow35/PhaseWeaver/blob/main/README_cn.md#dev)
 
 ```bash
 uv sync --extra dev
 uv run pytest -q
 uv run ruff check .
 uv run mypy src/phaseweaver
-# 跨平台类型检查(CI 在两个 OS 上各跑一次)
+# cross-platform type checking (CI runs once on each OS)
 uv run mypy --platform linux src/phaseweaver
 ```
 
-工程约定见 [CONTRIBUTING.md](CONTRIBUTING.md),PR 规范见 [AGENTS.md](AGENTS.md);实验、开发与取舍记录只保留在本地(`_local/`,不入库),仓库只保留可复现脚本与契约文档。
+Engineering conventions: [CONTRIBUTING.md](CONTRIBUTING.md); PR rules: [AGENTS.md](AGENTS.md).
+Experiments, dev logs and decision records stay local (`_local/`, not committed) — the repository
+only holds reproducible scripts and contract documents.
 
-### Demo 站点
+### Demo site
 
-静态页在 [`site/index.html`](site/index.html),由 GitHub Actions 发布到 GitHub Pages:
+The static pages live at [`site/`](site/) and are published by GitHub Actions:
 
-- 工作流:`.github/workflows/pages.yml`(构建 `site/` 制品 → `deploy-pages`)
-- 仓库 Settings → Pages → **Source: GitHub Actions**(只需设置一次)
-- 本地预览:`python -m http.server 8000 -d site`,或直接打开该文件
-- 单文件、无外部请求、可离线打开;动效在 `prefers-reduced-motion` 下自动关闭
+- Workflow: `.github/workflows/pages.yml` (builds the `site/` artifact → `deploy-pages`)
+- Repository Settings → Pages → **Source: GitHub Actions** (one-time setup)
+- Local preview: `python -m http.server 8000 -d site`, or just open a file
+- Single file, no external requests, works offline; animations respect `prefers-reduced-motion`
 
-## 状态与边界
+<a id="status"></a>
+## Status and limits · [中文](https://github.com/Frostsnow35/PhaseWeaver/blob/main/README_cn.md#status)
 
-- 核心机制与实验均在 mock 仿真上完成([L1]/[L2]),**尚未在真实 GPU 上验证**([L3],issue #3)。
-- 本仓库的性能数据依然为仿真数字验证的结果。
-- 实验复现:`python scripts/run_experiments.py`(结果记录不随仓库提交)
+- Core mechanisms and experiments run on a deterministic simulator (`[L1]`/`[L2]`); **no end-to-end validation on a real inference engine yet** (issue #3).
+- A `[L3] micro-benchmark` calibration on Kaggle T4 x2 (2026-11-10) replaced guessed constants: `bytes_per_token=57344` confirmed exactly, decode 33–34 tok/s vs mock 45, PCIe 12.22 GB/s vs 12.88, `contention_alpha≈0.018` vs 0.15. Parameter calibration, not a performance result.
+- Real prefill time is superlinear in prompt length; the simulator's constant `prefill_tok_per_s` is a known model limitation (`scripts/probe_calibration.py`).
+- Reproduce: `python scripts/run_experiments.py`, `probe_prefix.py`, `probe_capacity.py`, `probe_calibration.py` (raw rows stay in `runs/`, not committed).
 
-## 本机环境注意事项(sandbox)
+<a id="sandbox"></a>
+## Local sandbox notes (Windows) · [中文](https://github.com/Frostsnow35/PhaseWeaver/blob/main/README_cn.md#sandbox)
 
-1. `uv` 缓存需重定向:`$env:UV_CACHE_DIR=<repo>\.uv-cache`。
-2. 不使用 pytest 的 `tmp_path`:`%TEMP%` 与 `\\?\` 长路径在本机 sandbox 下不可访问。
-3. 子进程不能用管道捕获 stdio(会 `WinError 5`),工具执行走文件重定向。
-4. `taskkill` 在当前 token 下被拒绝,进程树回收改用 **Windows Job Object**。
-5. `tempfile.mkdtemp`(mode 0700)创建的目录不可写,私有临时目录用默认权限自建。
-6. `git push` 直接跑会失败(凭证管理器与 schannel 都被挡):用 `pwsh scripts/push.ps1`。
+1. Redirect the `uv` cache: `$env:UV_CACHE_DIR=<repo>\.uv-cache`.
+2. Do not use pytest's `tmp_path`: `%TEMP%` and `\\?\` long paths are inaccessible in this sandbox.
+3. Subprocess stdio cannot be captured through pipes (`WinError 5`); tools use file redirection.
+4. `taskkill` is denied under the current token; process-tree reaping uses a **Windows Job Object**.
+5. Directories created by `tempfile.mkdtemp` (mode 0700) are not writable; create private temp dirs with default permissions.
+6. A plain `git push` fails (credential manager and schannel are both blocked): use `pwsh scripts/push.ps1`.
 
-## 许可证
+<a id="license"></a>
+## License · [中文](https://github.com/Frostsnow35/PhaseWeaver/blob/main/README_cn.md#license)
 
 MIT
+
+[![CI](https://github.com/Frostsnow35/PhaseWeaver/actions/workflows/ci.yml/badge.svg)](https://github.com/Frostsnow35/PhaseWeaver/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue)](pyproject.toml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)

@@ -8,7 +8,7 @@ CI 保证"不坏",这份标准保证**达标**。每一条都必须可执行、�
 
 | # | 闸门 | 判据 | 当前 |
 |---|---|---|---|
-| 1 | 测试 | `pytest` 全绿,0 fail | 96 passed |
+| 1 | 测试 | `pytest` 全绿,0 fail | 125 passed |
 | 2 | 静态检查 | `ruff check .` 无告警 | PASS |
 | 3 | 类型 | `mypy --platform linux|win32 src/phaseweaver` 双平台 0 错 | 40 文件 PASS |
 | 4 | 确定性 | 同 seed 两次运行 `summary_row()` 完全一致 | PASS |
@@ -17,6 +17,12 @@ CI 保证"不坏",这份标准保证**达标**。每一条都必须可执行、�
 
 性能闸门是**回归保护**,不是营销数字:它只要求"我们的策略在目标场景不劣于基线",
 不把小样本波动当成成果。真实结论以多 seed 复跑为准(实验记录不随仓库提交)。
+
+`lint` 闸门先尝试 PATH 上的 `ruff` 可执行文件,再回退到 `python -m ruff`:部分 uv 环境
+装了 ruff wheel 却没在 venv 里生成 console script,模块形式会找不到二进制。
+
+`test_tool_error_is_not_fatal` 在 `simulate_tools=False` 下会起真实子进程,本机 sandbox
+偶发失败(管道/权限),单独重跑稳定通过;全量闸门出现单次 FAIL 时先复跑一次再判定。
 
 ## 效果标准(机制层)
 

@@ -23,6 +23,9 @@ dependencies = []
 Homepage = "https://github.com/Frostsnow35/PhaseWeaver"
 Issues = "https://github.com/Frostsnow35/PhaseWeaver/issues"
 
+[project.scripts]
+phaseweaver = "phaseweaver.demo:main"
+
 [project.optional-dependencies]
 dev = ["pytest>=8", "hypothesis>=6", "ruff>=0.6", "mypy>=1.11"]
 

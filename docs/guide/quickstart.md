@@ -12,7 +12,7 @@ pip install -e .
 
 ```python
 import asyncio
-from phaseweaver import PhaseWeaver
+from phaseweaver import PhaseWeaver, ToolSpec
 
 async def agent(unit):
     await unit.reason(prompt_tokens=2048, out_tokens=128)
@@ -104,3 +104,44 @@ print(pw.report().summary_row())
 ```
 
 所有指标由事件日志重放得出,可复现(同 seed 两次结果一致)。
+
+## 用你自己的 Agent 轨迹试(无需 GPU)
+
+`phaseweaver replay` 吃 JSONL 轨迹,每行一个 `reason` 或 `tool` 事件:
+
+```json
+{"ts":0.0,"unit_id":"a0","kind":"reason","prompt_tokens":4096,"out_tokens":128,"prefix_id":"sys-v1","prefix_tokens":3072}
+{"ts":3.2,"unit_id":"a0","kind":"tool","name":"pytest","tool_s":5.0}
+```
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `ts` | float | 事件时间(秒),用于排序与阅读,不参与仿真推进 |
+| `unit_id` | str | 同一 Agent 的事件归为一个执行单元 |
+| `kind` | `reason` / `tool` | 必填,其他值直接报错 |
+| `prompt_tokens`, `out_tokens` | int | `reason` 事件的 prefill / decode 长度 |
+| `tool_s` | float | `tool` 事件的实际耗时 |
+| `name` | str | 工具名,默认 `tool` |
+| `prefix_id`, `prefix_tokens` | str / int | 可选;共享前缀标识与长度,仅用于静态块级重合度测量 |
+
+```bash
+phaseweaver replay --trace examples/traces/sample.jsonl --seeds 0,1,2
+```
+
+`prefix_id` / `prefix_tokens` 缺失时前缀重合度报 `unknown`,不猜数。
+输出强制带 `[L1]` 标头与 seeds / C / SLO 脚注。仓库自带的 `sample.jsonl` 是合成样例,
+不是真实轨迹,不得当作真实负载的证据。
+
+## 用真机标定值复核结论
+
+Kaggle notebook(`_local/kaggle_l3_calibration.ipynb`,由 `scripts/make_kaggle_notebook.py` 生成)
+产出的 `calibration.json` 放进 `runs/kaggle-l3/` 后:
+
+```bash
+python scripts/probe_calibration.py
+```
+
+该脚本用真机常数与上下界跑 6 个 `[L2]` 变体,重算前缀命中与容量放大两条闸门,
+原始行写 `runs/calibration-probe.json`。标定口径是 `[L3] micro-benchmark / parameter calibration`,
+不是端到端性能结果;速率来自 0.5B、`bytes_per_token` 来自 7B,不能合并成同一份 `BackendCaps`。
+`prefill` 随 prompt 长度非线性,不要回填 `BackendCaps.prefill_tok_per_s`。
