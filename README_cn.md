@@ -124,7 +124,7 @@ uv run mypy --platform linux src/phaseweaver
 3. 子进程不能用管道捕获 stdio(会 `WinError 5`),工具执行走文件重定向。
 4. `taskkill` 在当前 token 下被拒绝,进程树回收改用 **Windows Job Object**。
 5. `tempfile.mkdtemp`(mode 0700)创建的目录不可写,私有临时目录用默认权限自建。
-6. `git push` 直接跑会失败(凭证管理器与 schannel 都被挡):用 `pwsh scripts/push.ps1`。
+6. `http.sslBackend=schannel` + `credential.helper=manager` 下 `git push` 可成功;沙箱仍会拒绝写 credential store(`Permission denied`)。凭据未缓存时用 `pwsh scripts/push.ps1` 单次注入 `gh auth token`。
 
 <a id="license"></a>
 ## 许可证 · [English](https://github.com/Frostsnow35/PhaseWeaver/blob/main/README.md#license)
