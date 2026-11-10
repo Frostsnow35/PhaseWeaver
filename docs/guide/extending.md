@@ -111,6 +111,45 @@ async with PhaseWeaver(backend="my-engine", profile="research") as pw:
 完整可运行示例:[examples/plugin_backend/](../../examples/plugin_backend/)(`pip install -e .` 后
 `PhaseWeaver(backend="example-device")` 即可)。
 
+## 6. 引擎适配层的公共原语(新增引擎从这里起步)
+
+实现一个引擎特有的管理面时,不要复制 HTTP 样板,也不要自造能力快照 dict:
+
+```python
+from phaseweaver.backends.http_admin import AdminHttpConfig, AdminHttpClient
+from phaseweaver.backends.capability import (
+    CapabilityField, CapabilityOrigin, CapabilityReport,
+)
+
+client = AdminHttpClient(AdminHttpConfig(base_url=..., timeout_s=...))
+raw = await client.call("POST", "/your-endpoint", {"k": "v"})   # 自动带 auth / 超时 / 错误包装
+report = CapabilityReport(
+    engine="your-engine",
+    contract_version="your-engine-admin/1",
+    evidence="[L3]-pending / protocol-level probe",
+    probed=True,
+    fields=(CapabilityField("kv_pool_bytes", value, CapabilityOrigin.ESTIMATED,
+                            "说明估值依据"),),
+    engine_version_checked="unverified",
+)
+```
+
+规则:
+
+- 每个能力值必须标 `CapabilityOrigin`。`PROBED` 只用于线上实测到的字段;启动参数写的是
+  `DECLARED`,由 `tokens × 假设 bytes_per_token` 推出来的是 `ESTIMATED`,引擎没暴露就是 `UNKNOWN`。
+  `BackendCaps` 全部是配置值,用 `caps_snapshot()` 转出来时一律 `DECLARED`。
+- **估值与声明值不得直接覆盖 `caps().capacity_bytes`**:那是租约预算,参与资源决策。除非调用方显式
+  opt-in,否则只写进 `CapabilityReport`。
+- `contract_version` 在端点形状变化时递增;`engine_version_checked` 记录核对过的发行版,
+  未核对就保持 `unverified`。
+- `client.call()` 用 `asyncio.to_thread`,取消协程**不会**中断已在发出的 HTTP 请求。
+  sleep / flush / reset 这类进程级副作用端点,取消后必须重新读引擎状态复核,不能假定没执行。
+- 端点形状与版本强相关,真机验证前一律标 `[L3]-pending`,不产出性能结论。
+
+`agent/vllm-native-adapter` 与 `agent/sglang-native-adapter` 两条实验分支复用这套原语;
+它们尚未合入 `main`。
+
 ## 开发约定(摘要)
 
 - 改状态机前先读设计规格中「阶段与上下文正交」一节;新增转移必须同时补测试。

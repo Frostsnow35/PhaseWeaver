@@ -6,7 +6,8 @@
 
 ### Added
 
-- 双语 README:`README.md` 英文、`README_cn.md` 中文;顶部按 `deepseek-ai/DeepSeek-Harness` 形态——标题下紧跟 `English | [中文](...)`,当前语言纯文本、另一语言可点,无居中 div / 顶部 badges(badges 移至文末);9 个节标题仍带指向对方语言同名锚点的定点跳转链接,切换后落在同一节。`pyproject.toml` 的 `readme` 仍指向 `README.md`(PyPI long_description 为英文)。两份 Status 节更新为 `[L3] micro-benchmark` 已标定、端到端真机验证仍未完成。
+- 引擎适配层公共原语:`backends/http_admin.py`(`AdminHttpClient` / `BackendAdminError`,统一 auth、超时、HTTP 状态与 JSON 错误包装)与 `backends/capability.py`(`CapabilityReport`,每个字段带 `probed / declared / estimated / unknown` 来源 + `contract_version` + `engine_version_checked`)。`OpenAICompatBackend._post_json` 改为复用前者,异常仍是 `RuntimeError` 子类,行为零变化(133 tests / 6/6 PASS)。加第三个引擎只需写端点映射与能力探测,不再复制 HTTP 样板或自造快照 dict。
+- 双语 README:`README.md` 英文、`README_cn.md` 中文;顶部按 `deepseek-ai/DeepSeek-Harness` 形态——标题下紧跟 `English | [中文](...)`,当前语言纯文本、另一语言可点,无居中 div / 顶部 badges(badges 移至文末);节标题的定点跳转链接按维护者后续决定移除,只保留顶部切换条。`pyproject.toml` 的 `readme` 仍指向 `README.md`(PyPI long_description 为英文)。两份 Status 节更新为 `[L3] micro-benchmark` 已标定、端到端真机验证仍未完成。
 - `pyproject.toml` 增加 `[project.scripts] phaseweaver = "phaseweaver.demo:main"`;`demo` 新增 `replay` 子命令与 `compare --prefix-hit-ratio`。
 - `src/phaseweaver/replay.py`:定义 JSONL trace 格式(`reason` / `tool` 事件 + 可选 `prefix_id` / `prefix_tokens`),`load_trace` / `prefix_overlap` / `replay_compare`;用户可用自己的 Agent 轨迹对比 pin-always 与 B2,输出强制带 `[L1]` 标头与 seeds / C / SLO 脚注。
 - `MockBackend` 增加 `prefix_hit_ratio`(`[L2]` 假设性上界,默认 0.0 时逐位保持原模型);`Workload` 与 `demo compare` 同步暴露该自变量。
