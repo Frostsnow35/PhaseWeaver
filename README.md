@@ -8,7 +8,7 @@ into programmable GPU resource decisions.
 Documentation: <https://frostsnow35.github.io/PhaseWeaver/>
 
 <a id="problem"></a>
-## What it solves · [中文](https://github.com/Frostsnow35/PhaseWeaver/blob/main/README_cn.md#problem)
+## What it solves
 
 An agent task is usually "reason for 3 s → run a tool for 30 s → reason again". During the tool
 phase the GPU is idle, but that agent's KV Cache still holds memory and other agents have to queue.
@@ -16,7 +16,7 @@ PhaseWeaver turns this switch point into an active decision — **retain / offlo
 and books the cost. Child agents can also **transfer KV ownership** between each other.
 
 <a id="start"></a>
-## Five-minute start · [中文](https://github.com/Frostsnow35/PhaseWeaver/blob/main/README_cn.md#start)
+## Five-minute start
 
 ```python
 import asyncio
@@ -44,7 +44,7 @@ KV accounting) that reproduces exactly for the same seed.
 - Project page: [site/index.html](site/index.html)
 
 <a id="profiles"></a>
-## Scenario profiles · [中文](https://github.com/Frostsnow35/PhaseWeaver/blob/main/README_cn.md#profiles)
+## Scenario profiles
 
 | profile | use case | default policy | default KV inheritance |
 |---|---|---|---|
@@ -65,7 +65,7 @@ trace (JSONL `reason` / `tool` events). The shipped trace is synthetic; the sche
 is documented in `phaseweaver.replay`. All output is `[L1]` simulation.
 
 <a id="mechanism"></a>
-## Core mechanisms · [中文](https://github.com/Frostsnow35/PhaseWeaver/blob/main/README_cn.md#mechanism)
+## Core mechanisms
 
 - **Two orthogonal state machines**: `Phase` (execution stage) and `ContextState` (KV ownership).
 - **Disposition leases**: `RETAIN / OFFLOAD / DROP / RELEASE` + engine capability negotiation + explicit degradation.
@@ -74,7 +74,7 @@ is documented in `phaseweaver.replay`. All output is `[L1]` simulation.
 - **Event journal**: metrics are replayed from the log; no parallel mutable counters are maintained.
 
 <a id="real-engine"></a>
-## Connecting a real engine · [中文](https://github.com/Frostsnow35/PhaseWeaver/blob/main/README_cn.md#real-engine)
+## Connecting a real engine
 
 ```python
 from phaseweaver.backends.vllm import VLLMBackend
@@ -90,7 +90,7 @@ no KV connector is available), with `degraded_from` recorded on the event.
 See the [Extending guide](docs/guide/extending.md) for the adapter protocol.
 
 <a id="dev"></a>
-## Development · [中文](https://github.com/Frostsnow35/PhaseWeaver/blob/main/README_cn.md#dev)
+## Development
 
 ```bash
 uv sync --extra dev
@@ -115,7 +115,7 @@ The static pages live at [`site/`](site/) and are published by GitHub Actions:
 - Single file, no external requests, works offline; animations respect `prefers-reduced-motion`
 
 <a id="status"></a>
-## Status and limits · [中文](https://github.com/Frostsnow35/PhaseWeaver/blob/main/README_cn.md#status)
+## Status and limits
 
 - Core mechanisms and experiments run on a deterministic simulator (`[L1]`/`[L2]`); **no end-to-end validation on a real inference engine yet** (issue #3).
 - A `[L3] micro-benchmark` calibration on Kaggle T4 x2 (2026-11-10) replaced guessed constants: `bytes_per_token=57344` confirmed exactly, decode 33–34 tok/s vs mock 45, PCIe 12.22 GB/s vs 12.88, `contention_alpha≈0.018` vs 0.15. Parameter calibration, not a performance result.
@@ -123,7 +123,7 @@ The static pages live at [`site/`](site/) and are published by GitHub Actions:
 - Reproduce: `python scripts/run_experiments.py`, `probe_prefix.py`, `probe_capacity.py`, `probe_calibration.py` (raw rows stay in `runs/`, not committed).
 
 <a id="sandbox"></a>
-## Local sandbox notes (Windows) · [中文](https://github.com/Frostsnow35/PhaseWeaver/blob/main/README_cn.md#sandbox)
+## Local sandbox notes (Windows)
 
 1. Redirect the `uv` cache: `$env:UV_CACHE_DIR=<repo>\.uv-cache`.
 2. Do not use pytest's `tmp_path`: `%TEMP%` and `\\?\` long paths are inaccessible in this sandbox.
@@ -135,7 +135,7 @@ The static pages live at [`site/`](site/) and are published by GitHub Actions:
    are not cached, use `pwsh scripts/push.ps1` to inject a `gh auth token` per invocation.
 
 <a id="license"></a>
-## License · [中文](https://github.com/Frostsnow35/PhaseWeaver/blob/main/README_cn.md#license)
+## License
 
 MIT
 
