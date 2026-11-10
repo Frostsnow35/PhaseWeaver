@@ -3,7 +3,19 @@
 证据等级：接口形态来自 vLLM 官方文档（sleep mode、prefix caching、KV connector），
 **未在真实 vLLM 服务上验证**。本分支不产出 `[L3]` 结论，也不声称任何性能收益。
 
-## 现状与缺陷
+## 本分支已实现（`[L3]-pending`）
+
+| 文件 | 内容 |
+|---|---|
+| `src/phaseweaver/backends/vllm.py` | `VLLMBackend` 改为 POST 原生端点；`probe()` 能力探测；`VLLMCapabilities` / `capability_snapshot()` |
+| `tests/integration/test_vllm_native.py` | 10 项 fake HTTP server 契约测试，零引擎依赖 |
+
+覆盖：sleep level 1/2、wake_up tags 分步、level 2 的 `reload_weights` + `reset_prefix_cache` 顺序、
+`/is_sleeping` 纯文本与 JSON 解析、`/metrics` 原文抓取、探测失败保守降级、
+`OFFLOAD → DROP`、`allow_engine_sleep` / `allow_collective_rpc` 显式开关、
+非法 level/tags 本地拒绝，以及取消 / 异常 / 超时后适配器状态不残留。
+
+## 现状与缺陷（`main` 基线）
 
 `main` 的 `VLLMBackend` 继承 `OpenAICompatBackend`，只加 `/sleep?level=1` 与 `/wake_up`：
 
@@ -14,6 +26,14 @@
 | 语义错配 | level 1 卸载权重到 CPU 并丢弃全部 KV cache，level 2 连权重也丢弃；这是引擎全局 `RELEASE`，不是按上下文 `OFFLOAD` |
 | level 2 流程不全 | 唤醒后必须 `collective_rpc("reload_weights")` 再 `wake_up?tags=kv_cache`，并 `POST /reset_prefix_cache` |
 | 无能力探测 | `supports_engine_sleep` 由配置写死，不探测服务端是否真的开放了端点 |
+
+以上五项已在本分支修正或如实登记：前四项进代码与契约测试，第五项改为「探测成功且显式 opt-in 才置位」。
+
+## 本版明确不做
+
+- 不注入 `kv_transfer_params`，即不实现 per-request `OFFLOAD` 数据面；声明了 connector 也仍降级 `DROP`，`VLLMCapabilities.supports_offload` 恒为 `False`。
+- 不统计 prefix cache 命中、不改写 `recompute_tokens`；命中率只能由引擎 `/metrics` 提供，HTTP 层拿不到 block 级信息。
+- 不修改 `main` 的 `BackendCaps`；能力通过 `VLLMBackend.capability_snapshot()` 暴露，待真机验证后再决定是否提升为公共契约。
 
 ## 原语映射
 
@@ -38,13 +58,14 @@
 
 ## 待验证项
 
-| 项 | 无 GPU 可做 | 需真机 |
-|---|---|---|
-| 端点 method / path / query 与降级路径 | fake HTTP server 契约测试 | — |
-| 能力探测失败时的保守降级 | 契约测试 | — |
-| 取消 / 异常 / 超时三条清理路径 | 契约测试 | — |
-| sleep↔wake 前后 TTFT、显存峰值、prefix cache 命中率 | — | ≥24 GiB 单卡 |
-| `kv_events` 与本地租约账本是否一致 | — | 起引擎后 |
+| 项 | 状态 |
+|---|---|
+| 端点 method / path / query 与降级路径 | 契约测试已覆盖（无 GPU） |
+| 能力探测失败时的保守降级 | 契约测试已覆盖 |
+| 取消 / 异常 / 超时三条清理路径 | 契约测试已覆盖；`asyncio.to_thread` 的取消不中断底层线程，是 stdlib 限制，已如实记录 |
+| sleep↔wake 前后 TTFT、显存峰值、prefix cache 命中率 | 需 ≥24 GiB 单卡，未做 |
+| `kv_events` 与本地租约账本是否一致 | 需起引擎，未做 |
+| 目标 vLLM 版本的端点形状核对 | 按官方文档设计，尚未对具体发行版校验 |
 
 ## 关联
 
