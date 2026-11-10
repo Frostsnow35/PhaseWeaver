@@ -7,14 +7,14 @@
 文档:<https://frostsnow35.github.io/PhaseWeaver/>
 
 <a id="problem"></a>
-## 它解决什么 · [English](https://github.com/Frostsnow35/PhaseWeaver/blob/main/README.md#problem)
+## 它解决什么
 
 一个 Agent 任务通常是「推理 3 秒 → 跑工具 30 秒 → 再推理」。工具阶段 GPU 空转,但该 Agent 的
 KV Cache 仍占着显存,其他 Agent 只能排队。PhaseWeaver 把这个切换点变成主动决策:
 **保留 / 卸载 / 丢弃 / 释放**,并把代价写进账里;子 Agent 之间还能**移交 KV 所有权**。
 
 <a id="start"></a>
-## 五分钟开始 · [English](https://github.com/Frostsnow35/PhaseWeaver/blob/main/README.md#start)
+## 五分钟开始
 
 ```python
 import asyncio
@@ -41,7 +41,7 @@ asyncio.run(main())
 - 项目展示页:[site/index.html](site/index.html)
 
 <a id="profiles"></a>
-## 场景档案 · [English](https://github.com/Frostsnow35/PhaseWeaver/blob/main/README.md#profiles)
+## 场景档案
 
 | profile | 适用 | 默认策略 | 默认 KV 继承 |
 |---|---|---|---|
@@ -62,7 +62,7 @@ phaseweaver replay --trace examples/traces/sample.jsonl --seeds 0,1,2
 所有输出均为 `[L1]` 仿真。
 
 <a id="mechanism"></a>
-## 核心机制 · [English](https://github.com/Frostsnow35/PhaseWeaver/blob/main/README.md#mechanism)
+## 核心机制
 
 - **双状态机**:`Phase`(执行阶段)与 `ContextState`(KV 归属)正交。
 - **处置权租约**:`RETAIN / OFFLOAD / DROP / RELEASE` + 引擎能力协商 + 显式降级。
@@ -71,7 +71,7 @@ phaseweaver replay --trace examples/traces/sample.jsonl --seeds 0,1,2
 - **事件日志记录**:日志整理记录各指标,不维护并行计数器。
 
 <a id="real-engine"></a>
-## 接入真实引擎 · [English](https://github.com/Frostsnow35/PhaseWeaver/blob/main/README.md#real-engine)
+## 接入真实引擎
 
 ```python
 from phaseweaver.backends.vllm import VLLMBackend
@@ -86,7 +86,7 @@ async with PhaseWeaver(backend=backend, profile="research") as pw:
 适配器协议见 [扩展指南](docs/guide/extending.md)。
 
 <a id="dev"></a>
-## 开发 · [English](https://github.com/Frostsnow35/PhaseWeaver/blob/main/README.md#dev)
+## 开发
 
 ```bash
 uv sync --extra dev
@@ -109,7 +109,7 @@ uv run mypy --platform linux src/phaseweaver
 - 单文件、无外部请求、可离线打开;动效在 `prefers-reduced-motion` 下自动关闭
 
 <a id="status"></a>
-## 状态与边界 · [English](https://github.com/Frostsnow35/PhaseWeaver/blob/main/README.md#status)
+## 状态与边界
 
 - 核心机制与实验都在确定性仿真上完成([L1]/[L2]),**尚未在真实推理引擎上做端到端验证**(issue #3)。
 - 2026-11-10 在 Kaggle T4 x2 完成 `[L3] micro-benchmark` 参数标定:`bytes_per_token=57344` 精确对齐;decode 33–34 tok/s(mock 45);PCIe 12.22 GB/s(mock 12.88);`contention_alpha≈0.018`(mock 0.15)。这是参数标定,不是性能结论。
@@ -117,7 +117,7 @@ uv run mypy --platform linux src/phaseweaver
 - 复现:`python scripts/run_experiments.py`、`probe_prefix.py`、`probe_capacity.py`、`probe_calibration.py`(原始行留在 `runs/`,不入库)。
 
 <a id="sandbox"></a>
-## 本机环境注意事项(sandbox) · [English](https://github.com/Frostsnow35/PhaseWeaver/blob/main/README.md#sandbox)
+## 本机环境注意事项(sandbox)
 
 1. `uv` 缓存需重定向:`$env:UV_CACHE_DIR=<repo>\.uv-cache`。
 2. 不使用 pytest 的 `tmp_path`:`%TEMP%` 与 `\\?\` 长路径在本机 sandbox 下不可访问。
@@ -127,7 +127,7 @@ uv run mypy --platform linux src/phaseweaver
 6. `http.sslBackend=schannel` + `credential.helper=manager` 下 `git push` 可成功;沙箱仍会拒绝写 credential store(`Permission denied`)。凭据未缓存时用 `pwsh scripts/push.ps1` 单次注入 `gh auth token`。
 
 <a id="license"></a>
-## 许可证 · [English](https://github.com/Frostsnow35/PhaseWeaver/blob/main/README.md#license)
+## 许可证
 
 MIT
 
