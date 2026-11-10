@@ -130,7 +130,9 @@ The static pages live at [`site/`](site/) and are published by GitHub Actions:
 3. Subprocess stdio cannot be captured through pipes (`WinError 5`); tools use file redirection.
 4. `taskkill` is denied under the current token; process-tree reaping uses a **Windows Job Object**.
 5. Directories created by `tempfile.mkdtemp` (mode 0700) are not writable; create private temp dirs with default permissions.
-6. A plain `git push` fails (credential manager and schannel are both blocked): use `pwsh scripts/push.ps1`.
+6. `git push` works with `http.sslBackend=schannel` and `credential.helper=manager`;
+   the sandbox still denies writing the credential store (`Permission denied`). If credentials
+   are not cached, use `pwsh scripts/push.ps1` to inject a `gh auth token` per invocation.
 
 <a id="license"></a>
 ## License · [中文](https://github.com/Frostsnow35/PhaseWeaver/blob/main/README_cn.md#license)
