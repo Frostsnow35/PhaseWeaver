@@ -133,22 +133,52 @@ def test_is_sleeping_parses_plain_and_json(server: str) -> None:
     assert asyncio.run(scenario()) == [False, True]
 
 
-def test_probe_records_declared_capabilities_without_fake_offload(server: str) -> None:
-    async def scenario() -> tuple[dict[str, object], bool]:
+def test_probe_records_origins_and_never_fakes_offload(server: str) -> None:
+    async def scenario() -> tuple[dict[str, object], bool, int]:
         b = backend(server, prefix_caching_enabled=True, kv_connector_enabled=True,
                     kv_pool_bytes=4 * 1024**3)
         caps = await b.probe()
-        return b.capability_snapshot(), caps.supports_offload
+        return b.capability_snapshot(), caps.supports_offload, b.caps().capacity_bytes
 
-    snapshot, offload = asyncio.run(scenario())
+    snapshot, offload, capacity = asyncio.run(scenario())
     assert snapshot["probed"] is True
     assert snapshot["admin_endpoints"] is True
+    assert snapshot["admin_endpoints_origin"] == "probed"
     assert snapshot["prefix_caching_declared"] is True
+    assert snapshot["prefix_caching_declared_origin"] == "declared"
     assert snapshot["kv_connector_declared"] is True
     assert snapshot["kv_pool_bytes"] == 4 * 1024**3
-    assert snapshot["offload_data_path"].startswith("not implemented")
+    assert snapshot["kv_pool_bytes_origin"] == "declared"
+    assert snapshot["contract_version"] == "vllm-admin/1"
+    assert snapshot["engine_version_checked"] == "unverified"
+    assert str(snapshot["offload_data_path"]).startswith("not implemented")
     assert str(snapshot["evidence"]).startswith("[L3]-pending")
     assert offload is False
+    # A declared pool size must NOT silently become the lease budget.
+    assert capacity == 8 * 1024**3
+
+
+def test_declared_capacity_needs_explicit_opt_in(server: str) -> None:
+    async def scenario() -> int:
+        b = backend(server, kv_pool_bytes=4 * 1024**3, accept_declared_capacity=True,
+                    engine_version="v0.11.0")
+        await b.probe()
+        return b.caps().capacity_bytes
+
+    assert asyncio.run(scenario()) == 4 * 1024**3
+
+
+def test_probe_rejects_empty_200_body(server: str) -> None:
+    _Handler.sleep_body = ""
+
+    async def scenario() -> tuple[bool, str]:
+        b = backend(server)
+        caps = await b.probe()
+        return caps.probed, caps.detail
+
+    probed, detail = asyncio.run(scenario())
+    assert probed is False
+    assert "is_sleeping unusable" in detail
 
 
 def test_probe_failure_is_conservative(server: str) -> None:

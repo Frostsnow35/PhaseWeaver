@@ -8,12 +8,25 @@
 | 文件 | 内容 |
 |---|---|
 | `src/phaseweaver/backends/vllm.py` | `VLLMBackend` 改为 POST 原生端点；`probe()` 能力探测；`VLLMCapabilities` / `capability_snapshot()` |
-| `tests/integration/test_vllm_native.py` | 10 项 fake HTTP server 契约测试，零引擎依赖 |
+| `tests/integration/test_vllm_native.py` | 12 项 fake HTTP server 契约测试，零引擎依赖 |
 
 覆盖：sleep level 1/2、wake_up tags 分步、level 2 的 `reload_weights` + `reset_prefix_cache` 顺序、
 `/is_sleeping` 纯文本与 JSON 解析、`/metrics` 原文抓取、探测失败保守降级、
 `OFFLOAD → DROP`、`allow_engine_sleep` / `allow_collective_rpc` 显式开关、
 非法 level/tags 本地拒绝，以及取消 / 异常 / 超时后适配器状态不残留。
+
+## 可扩展性收口（与 `main` 共用，非分支私有）
+
+| 维度 | 收口前 | 收口后 |
+|---|---|---|
+| HTTP 传输 | 适配器内自写 `_request` 一份 | 复用 `backends/http_admin.py` 的 `AdminHttpClient`，与 SGLang 分支、`OpenAICompatBackend` 同一套 auth / 超时 / HTTP 状态 / JSON 错误策略 |
+| 错误类型 | `VLLMAdminError(RuntimeError)` 与其他引擎互不兼容 | `VLLMAdminError(BackendAdminError)`，上层可按统一基类捕获管理面故障；对外仍是 `RuntimeError` 子类 |
+| 能力快照 | 无 schema 的扁平 dict，字段来源靠人记 | `CapabilityReport`：每个字段带 `_origin`（`probed` / `declared` / `estimated` / `unknown`），附 `contract_version=vllm-admin/1` 与 `engine_version_checked` |
+| 资源预算 | 声明的 `kv_pool_bytes` 直接写 `caps().capacity_bytes` | 默认只写进报告；只有 `accept_declared_capacity=True` 才进入租约预算 |
+| 探测证据 | `/is_sleeping` 返回 200 就置 `admin_endpoints=True` | 必须返回合法 bool / JSON，空 body 或 HTML 一律 `probed=False`；`admin_endpoints` 的 detail 明确标注「推断，不证明 `/sleep` 可用」 |
+
+`contract_version` 在端点形状变化时递增；`engine_version_checked` 默认 `unverified`，
+真机核对后由调用方传入具体发行版。
 
 ## 现状与缺陷（`main` 基线）
 
@@ -34,6 +47,7 @@
 - 不注入 `kv_transfer_params`，即不实现 per-request `OFFLOAD` 数据面；声明了 connector 也仍降级 `DROP`，`VLLMCapabilities.supports_offload` 恒为 `False`。
 - 不统计 prefix cache 命中、不改写 `recompute_tokens`；命中率只能由引擎 `/metrics` 提供，HTTP 层拿不到 block 级信息。
 - 不修改 `main` 的 `BackendCaps`；能力通过 `VLLMBackend.capability_snapshot()` 暴露，待真机验证后再决定是否提升为公共契约。
+- 不把声明的 `kv_pool_bytes` 直接当资源预算：它是 `DECLARED`，默认只进报告，不参与租约决策（显式 `accept_declared_capacity=True` 除外）。
 
 ## 原语映射
 

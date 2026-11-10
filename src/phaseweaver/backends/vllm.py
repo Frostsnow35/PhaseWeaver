@@ -16,23 +16,36 @@ no prefix-cache hit accounting, no change to ``BackendCaps`` in ``main``. The
 HTTP surface cannot observe block-level refcounts, so the adapter records what
 the deployment declares and what it can probe, and keeps degrading
 ``OFFLOAD -> DROP`` instead of pretending data was moved.
+
+Transport and capability reporting come from the engine-agnostic modules in
+``backends/http_admin.py`` and ``backends/capability.py``. Adding another engine
+should reuse them, not copy this file's HTTP plumbing.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
-import urllib.error
-import urllib.request
 from dataclasses import dataclass, replace
 from typing import Any
 
+from phaseweaver.backends.capability import (
+    CapabilityField,
+    CapabilityOrigin,
+    CapabilityReport,
+)
+from phaseweaver.backends.http_admin import (
+    AdminHttpClient,
+    AdminHttpConfig,
+    BackendAdminError,
+)
 from phaseweaver.backends.openai_compat import OpenAICompatBackend, OpenAICompatConfig
 
 _VALID_TAGS = frozenset({"weights", "kv_cache"})
+_CONTRACT_VERSION = "vllm-admin/1"
+_EVIDENCE = "[L3]-pending / protocol-level probe, no real-GPU result"
 
 
-class VLLMAdminError(RuntimeError):
+class VLLMAdminError(BackendAdminError):
     """An engine-admin call was rejected, timed out, or returned an unusable body."""
 
 
@@ -40,8 +53,8 @@ class VLLMAdminError(RuntimeError):
 class VLLMCapabilities:
     """Probed and declared capabilities, kept separate from ``BackendCaps``.
 
-    ``admin_endpoints`` is inferred from ``/is_sleeping`` being reachable; it is
-    not proof of a particular server flag. ``prefix_caching`` / ``kv_connector``
+    ``admin_endpoints`` is inferred from a *valid* ``/is_sleeping`` response; it
+    is not proof of a particular server flag. ``prefix_caching`` / ``kv_connector``
     cannot be observed over HTTP, so they are deployment declarations.
     """
 
@@ -71,20 +84,32 @@ class VLLMBackend(OpenAICompatBackend):
         kv_connector_enabled: bool = False,
         kv_pool_bytes: int | None = None,
         allow_collective_rpc: bool = False,
+        accept_declared_capacity: bool = False,
+        engine_version: str = "unverified",
     ) -> None:
         super().__init__(config)
         self._prefix_caching_enabled = prefix_caching_enabled
         self._kv_connector_enabled = kv_connector_enabled
         self._kv_pool_bytes = kv_pool_bytes
         self._allow_collective_rpc = allow_collective_rpc
+        self._accept_declared_capacity = accept_declared_capacity
+        self._engine_version = engine_version
+        self._http = AdminHttpClient(
+            AdminHttpConfig(
+                base_url=self.config.base_url,
+                api_key=self.config.api_key,
+                timeout_s=self.config.timeout_s,
+            )
+        )
         self._vllm_caps = VLLMCapabilities(probed=False)
+        self._report = self._build_report(self._vllm_caps)
         # Conservative until probe(): the old adapter advertised sleep purely
         # from a config flag, which is not evidence the endpoint exists.
         self._caps = replace(
             self._caps,
             supports_engine_sleep=False,
             supports_offload=False,
-            capacity_bytes=kv_pool_bytes or self._caps.capacity_bytes,
+            capacity_bytes=self._initial_capacity(),
         )
 
     # --- capability probe -------------------------------------------------
@@ -92,27 +117,64 @@ class VLLMBackend(OpenAICompatBackend):
     def capabilities(self) -> VLLMCapabilities:
         return self._vllm_caps
 
+    @property
+    def capability_report(self) -> CapabilityReport:
+        return self._report
+
     def capability_snapshot(self) -> dict[str, object]:
         """Flat record for experiment reports; never a performance measurement."""
-        caps = self._vllm_caps
-        return {
-            "engine": "vllm",
-            "evidence": "[L3]-pending / protocol-level probe, no real-GPU result",
-            "probed": caps.probed,
-            "admin_endpoints": caps.admin_endpoints,
-            "prefix_caching_declared": caps.prefix_caching,
-            "kv_connector_declared": caps.kv_connector,
-            "kv_pool_bytes": caps.kv_pool_bytes,
-            "offload_data_path": "not implemented (OFFLOAD degrades to DROP)",
-            "detail": caps.detail,
-        }
+        return self._report.as_dict()
+
+    def _initial_capacity(self) -> int:
+        # A declared KV-pool size is NOT an observation. It only enters the lease
+        # budget when the caller explicitly opts in.
+        if self._accept_declared_capacity and self._kv_pool_bytes:
+            return self._kv_pool_bytes
+        return self._caps.capacity_bytes
+
+    def _build_report(self, caps: VLLMCapabilities) -> CapabilityReport:
+        declared = CapabilityOrigin.DECLARED
+        unknown = CapabilityOrigin.UNKNOWN
+        fields = (
+            CapabilityField(
+                "admin_endpoints",
+                caps.admin_endpoints,
+                CapabilityOrigin.PROBED if caps.probed else unknown,
+                "inferred from GET /is_sleeping; does not prove POST /sleep is enabled",
+            ),
+            CapabilityField("prefix_caching_declared", caps.prefix_caching, declared,
+                            "server flag --enable-prefix-caching"),
+            CapabilityField("kv_connector_declared", caps.kv_connector, declared,
+                            "server --kv-transfer-config"),
+            CapabilityField(
+                "kv_pool_bytes", caps.kv_pool_bytes,
+                declared if caps.kv_pool_bytes else unknown,
+                "deployment declaration, not measured",
+            ),
+            CapabilityField("offload_data_path",
+                            "not implemented (OFFLOAD degrades to DROP)", declared),
+            CapabilityField("supports_offload", caps.supports_offload, declared),
+            CapabilityField("supports_engine_sleep", caps.supports_engine_sleep, declared,
+                            "also requires allow_engine_sleep opt-in"),
+        )
+        return CapabilityReport(
+            engine="vllm",
+            contract_version=_CONTRACT_VERSION,
+            evidence=_EVIDENCE,
+            probed=caps.probed,
+            fields=fields,
+            engine_version_checked=self._engine_version,
+            detail=caps.detail,
+        )
 
     async def probe(self) -> VLLMCapabilities:
         """Probe admin endpoints once. Failure is conservative, never fatal."""
         try:
-            await self._call("GET", "/is_sleeping")
-        except VLLMAdminError as exc:
-            caps = VLLMCapabilities(probed=False, detail=f"is_sleeping unreachable: {exc}")
+            raw = await self._call("GET", "/is_sleeping")
+            # A 200 with an empty or HTML body is not evidence of a dev endpoint.
+            _parse_bool(raw)
+        except BackendAdminError as exc:
+            caps = VLLMCapabilities(probed=False, detail=f"is_sleeping unusable: {exc}")
         else:
             caps = VLLMCapabilities(
                 probed=True,
@@ -120,14 +182,16 @@ class VLLMBackend(OpenAICompatBackend):
                 prefix_caching=self._prefix_caching_enabled,
                 kv_connector=self._kv_connector_enabled,
                 kv_pool_bytes=self._kv_pool_bytes,
-                detail="/is_sleeping reachable (dev endpoints inferred)",
+                detail="/is_sleeping returned a valid body (dev endpoints inferred)",
             )
         self._vllm_caps = caps
+        self._report = self._build_report(caps)
         self._caps = replace(
             self._caps,
             supports_engine_sleep=caps.supports_engine_sleep
             and self.config.allow_engine_sleep,
             supports_offload=caps.supports_offload,
+            capacity_bytes=self._initial_capacity(),
         )
         return caps
 
@@ -179,23 +243,10 @@ class VLLMBackend(OpenAICompatBackend):
     async def _call(
         self, method: str, path: str, payload: dict[str, object] | None = None
     ) -> str:
-        return await asyncio.to_thread(self._request, method, path, payload)
-
-    def _request(
-        self, method: str, path: str, payload: dict[str, object] | None = None
-    ) -> str:
-        url = self.config.base_url.rstrip("/") + path
-        data = json.dumps(payload).encode("utf-8") if payload is not None else None
-        headers = {"Content-Type": "application/json"} if data is not None else {}
-        if self.config.api_key:
-            headers["Authorization"] = f"Bearer {self.config.api_key}"
-        request = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(request, timeout=self.config.timeout_s) as resp:
-                raw: bytes = resp.read()
-                return raw.decode("utf-8")
-        except (urllib.error.URLError, OSError, TimeoutError) as exc:
-            raise VLLMAdminError(f"{method} {path} failed: {exc}") from exc
+            return await self._http.call(method, path, payload)
+        except BackendAdminError as exc:
+            raise VLLMAdminError(str(exc)) from exc
 
 
 def _parse_bool(raw: str) -> bool:

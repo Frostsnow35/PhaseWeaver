@@ -23,6 +23,8 @@ async def main() -> None:
         OpenAICompatConfig(base_url="http://127.0.0.1:8000", allow_engine_sleep=True),
         prefix_caching_enabled=True,
         kv_connector_enabled=False,
+        # Set to the exact vLLM release once endpoint shapes are verified on hardware.
+        engine_version="unverified",
     )
     caps = await backend.probe()
     print(json.dumps(backend.capability_snapshot(), indent=2, ensure_ascii=False))
