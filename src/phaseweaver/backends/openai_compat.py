@@ -15,10 +15,7 @@ Capabilities it honestly does NOT have (and therefore degrades):
 from __future__ import annotations
 
 import asyncio
-import json
 import time
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
@@ -29,6 +26,7 @@ from phaseweaver.backends.base import (
     ParkResult,
     RestoreResult,
 )
+from phaseweaver.backends.http_admin import AdminHttpClient, AdminHttpConfig
 from phaseweaver.types import Disposition
 
 
@@ -168,19 +166,15 @@ class OpenAICompatBackend:
 
     # --- HTTP -------------------------------------------------------------
     def _post_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
-        url = self.config.base_url.rstrip("/") + path
-        data = json.dumps(payload).encode("utf-8")
-        headers = {"Content-Type": "application/json"}
-        if self.config.api_key:
-            headers["Authorization"] = f"Bearer {self.config.api_key}"
-        request = urllib.request.Request(url, data=data, headers=headers, method="POST")
-        try:
-            with urllib.request.urlopen(request, timeout=self.config.timeout_s) as resp:
-                raw = resp.read().decode("utf-8")
-        except urllib.error.URLError as exc:  # pragma: no cover - network path
-            raise RuntimeError(f"inference request failed: {exc}") from exc
-        parsed: dict[str, Any] = json.loads(raw)
-        return parsed
+        client = AdminHttpClient(
+            AdminHttpConfig(
+                base_url=self.config.base_url,
+                api_key=self.config.api_key,
+                timeout_s=self.config.timeout_s,
+            )
+        )
+        parsed: Any = client.request_json("POST", path, payload)
+        return parsed if isinstance(parsed, dict) else {}
 
 
 def _dummy_prompt(tokens: int) -> str:
